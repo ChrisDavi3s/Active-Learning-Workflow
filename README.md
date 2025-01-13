@@ -60,6 +60,8 @@ ASE_CALCULATORS = [MACECalculator(model_path="model.pt", device="cuda")]
 
 $ python run_active_learning.py
 
+```text
+
 Key Configuration Parameters:
 --------------------------
 BASE_DIR          : Output directory (default: "workflow_results")
@@ -76,7 +78,7 @@ Each run directory contains:
 - npt.extxyz      : NPT trajectory
 - core_stats.npz   : Compressed analysis results
 - run_statistics.png : Analysis plots
-"""
+```
 
 ## Example Analysis Plots
 Below are example plots generated for each run:
