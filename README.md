@@ -7,6 +7,13 @@ The general idea is:
 
 # 1) run_active_learning.py
 
+THIS NEEDS TO RUN WITH A GPU (well no but yes)
+
+On Young login node run this to get an interactive node:
+```bash
+qrsh -pe smp 8 -l mem=2056M,h_rt=2:00:00,gpu=1,tmpfs=50G -now no -A MCC_bulk_isl
+```
+
 This script implements a workflow for:
 1. Structure relaxation
 2. NPT molecular dynamics
