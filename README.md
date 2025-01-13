@@ -1,7 +1,11 @@
 # active_learning_workflow
 An Active Learning workflow for a committee of ASE calculators
+The general idea is:
 
-## run_active_learning.py
+1) From an XYZ file, run a committee, generate trajectories and their associated errors
+2) Generate overall statistics and find worst frames in these generated runs.
+
+## 1) run_active_learning.py
 
 This script implements a workflow for:
 1. Structure relaxation
