@@ -1,4 +1,4 @@
-# active_learning_workflow
+# Active Learning Workflow
 An Active Learning workflow for a committee of ASE calculators
 The general idea is:
 
