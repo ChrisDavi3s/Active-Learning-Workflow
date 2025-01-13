@@ -8,7 +8,7 @@ This script implements a workflow for:
 2. NPT molecular dynamics
 3. Uncertainty analysis using model committees
 
-## Requirements
+### Requirements
 - Python 3.8+
 - ASE
 - NequIP (or other ML potential package)
@@ -17,21 +17,27 @@ This script implements a workflow for:
 - Matplotlib
 - tqdm
 
-## Directory Structure
-root/
-├── run_active_learning.py
-├── inputs.xyz    # Input structures
-├── deployed_model_0.pth       # Committee model 1
-├── deployed_model_1.pth       # Committee model 2
-├── deployed_model_2.pth       # Committee model 3
-├── deployed_model_...         # Committee model n
-└── workflow_results/          # Created automatically
-    ├── logs/
-    ├── run_0000/
+### Directory Structure
+```text
+.
+├── run_active_learning.py         # Main workflow script
+├── input_structures.xyz           # Input structures file
+├── models/                        # Model directory
+│   ├── deployed_model_0.pth       # Committee model 1
+│   ├── deployed_model_1.pth       # Committee model 2
+│   └── deployed_model_2.pth       # Committee model 3
+└── workflow_results/              # Generated output
+    ├── logs/                      # Workflow logs
+    │   └── 
+    ├── run_0000/                  # Individual run results
+    │   ├── relaxation.traj
+    │   ├── npt.extxyz
+    │   └── 
     ├── run_0001/
-    └── ...
+    └── run_N/
+```
 
-## Calculator Configuration
+### Calculator Configuration
 The workflow requires ASE-compatible calculators.
 
 ```python
@@ -46,7 +52,7 @@ ASE_CALCULATORS = [MACECalculator(model_path="model.pt", device="cuda")]
 
 ```
 
-## Usage
+### Usage
 
 $ python run_active_learning.py
 
