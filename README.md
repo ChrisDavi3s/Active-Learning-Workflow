@@ -5,7 +5,7 @@ The general idea is:
 1) From an XYZ file, run a committee, generate trajectories and their associated errors
 2) Generate overall statistics and find worst frames in these generated runs.
 
-## 1) run_active_learning.py
+# 1) run_active_learning.py
 
 This script implements a workflow for:
 1. Structure relaxation
@@ -80,7 +80,7 @@ Each run directory contains:
 - run_statistics.png : Analysis plots
 ```
 
-## Example Analysis Plots
+### Example Analysis Plots
 Below are example plots generated for each run:
 
 ![Example analysis plots](./images/run_statistics.png)
