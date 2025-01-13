@@ -170,3 +170,8 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 run_active_learning copy.py
+worst_frames.xyz
+deployed_model_2.pth
+deployed_model_1.pth
+deployed_model_0.pth
+generated_structures.xyz

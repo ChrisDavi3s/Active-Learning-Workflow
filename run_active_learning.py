@@ -18,7 +18,7 @@ import logging
 from datetime import datetime
 from dataclasses import dataclass
 import json
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 
 
 ##############################
@@ -44,12 +44,12 @@ nequip_model_files = ['deployed_model_0.pth',
                       'deployed_model_1.pth',
                       'deployed_model_2.pth']
 ASE_CALCULATORS = [NequIPCalculator.from_deployed_model(model_path=model, 
-                                                        device="cuda") for model in nequip_model_files] 
+                                                        device="gpu") for model in nequip_model_files] 
 
 
 # Simulation Parameters
 
-RELAXATION_STEPS = 50   # Number of relaxation steps before running NPT simulation
+RELAXATION_STEPS = 25   # Number of relaxation steps before running NPT simulation. Can be 0
 RELAX_FORCE_CONVERGENCE = 0.01  # Convergence criterion for relaxation
 
 NPT_STEPS = 4000             # Number of NPT simulation steps
@@ -89,14 +89,17 @@ def suppress_warnings():
 
 
 class TrajectoryAnalysis:
-    def __init__(self) -> None:
-        """Initialize analysis with paths to committee models.
-        Keeps models loaded in memory.
-
-        Parameters: None
-        Returns: None
+    def __init__(self, logger: logging.Logger = None) -> None:
+        """Initialize analysis with paths to committee models and logger.
+        
+        Parameters:
+        -----------
+        logger : logging.Logger, optional
+            Logger instance for analysis
         """
         self.calculators = ASE_CALCULATORS
+        self.logger = logger or logging.getLogger(__name__)
+
 
     def calculate_von_mises_stress(self, stress_tensor: np.ndarray) -> float:
         """Calculate von Mises stress from full 3x3 stress tensor.
@@ -154,7 +157,7 @@ class TrajectoryAnalysis:
             'force_species_data': []
         }
 
-        for frame_idx, structure in tqdm(enumerate(trajectory), total=n_frames):
+        for frame_idx, structure in tqdm(enumerate(trajectory), total=n_frames, desc='Analysing uncertainty with committee'):
             frame_results = {}
 
             for i, calc in enumerate(self.calculators):
@@ -209,9 +212,9 @@ class RunStatus:
         Error message if any step failed
     '''
     structure_index: int
-    relaxation_success: bool = False
-    npt_success: bool = False
-    analysis_success: bool = False
+    relaxation_success: Optional[bool] = None
+    npt_success: Optional[bool] = None
+    analysis_success: Optional[bool] = None
     error_message: str = ""
 
     def mark_failed(self, msg: str):
@@ -224,6 +227,10 @@ class RunStatus:
     def is_failed(self) -> bool:
         """Check whether any step has failed."""
         return bool(self.error_message) or not (self.relaxation_success and self.npt_success and self.analysis_success)
+
+    def is_failed_before_analysis(self) -> bool:
+        """Check whether relaxation or NPT failed."""
+        return bool(self.error_message) or not (self.relaxation_success and self.npt_success)
 
     def __str__(self) -> str:
         """Format status as human-readable string."""
@@ -281,7 +288,7 @@ class WorkflowManager:
         self.npt_temp = npt_temp
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
-        self.logger = logger
+        self.logger = logger.getChild('workflow_manager')  # Create child logger
 
         try:
             self.structures = read(str(self.input_xyz), index=":")
@@ -290,12 +297,13 @@ class WorkflowManager:
             self.logger.error(f"Failed to load structures: {str(e)}")
             raise
 
-        self.analyser = TrajectoryAnalysis()
+        analysis_logger = self.logger.getChild('analysis')
+        self.analyser = TrajectoryAnalysis(logger=analysis_logger)
         self.run_status = []
     
     def run_all(self) -> Tuple[int, int]:
         """Run complete workflow for all structures.
-
+        
         Returns:
         --------
         Tuple[int, int]
@@ -310,12 +318,19 @@ class WorkflowManager:
 
             run_dir = self.setup_run_directory(idx)
             try:
-                relaxed = self.relax_structure(
-                    atoms=structure.copy(), 
-                    run_dir=run_dir, 
-                    status=status, 
-                    steps=self.relax_steps
-                )
+                if self.relax_steps > 0:
+                    relaxed = self.relax_structure(
+                        atoms=structure.copy(), 
+                        run_dir=run_dir, 
+                        status=status, 
+                        steps=self.relax_steps
+                    )
+                else:
+                    # Skip relaxation but mark as successful
+                    self.logger.info(f"Skipping relaxation for structure {idx} (relax_steps=0)")
+                    relaxed = structure.copy()
+                    status.relaxation_success = True
+                    
                 npt_trajectory = self.run_npt(
                     atoms=relaxed, 
                     run_dir=run_dir, 
@@ -325,7 +340,7 @@ class WorkflowManager:
                 )
 
                 # Only analyse if we haven't failed yet
-                if not status.is_failed():
+                if not status.is_failed_before_analysis():
                     self.analyse_run(run_dir, npt_trajectory, status)
 
             except Exception as e:
@@ -339,6 +354,7 @@ class WorkflowManager:
             "failed_runs": failed_runs,
             "run_status": [s.to_dict() for s in self.run_status],
             "timestamp": datetime.now().isoformat(),
+            "relaxation_performed": self.relax_steps > 0
         }
         with open(self.base_dir / 'workflow_status.json', 'w') as f:
             json.dump(status_data, f, indent=2)
@@ -515,7 +531,6 @@ class WorkflowManager:
             Analysis results dictionary
         """
         self.logger.info(f"Starting analysis for structure {status.structure_index}")
-
         try:
             results = self.analyser.analyse_trajectory(trajectory)
             self.save_run_statistics(results, run_dir)
@@ -523,14 +538,13 @@ class WorkflowManager:
             status.analysis_success = True
             self.logger.info(f"Successfully analysed structure {status.structure_index}")
             return results
-
+            
         except Exception as e:
             error_msg = f"Analysis failed for structure {status.structure_index}: {str(e)}"
             self.logger.error(error_msg)
             status.error_message = error_msg
             raise
             
-
     def summarise_workflow(self):
         """Print workflow summary"""
         successful = sum(1 for status in self.run_status 
@@ -554,101 +568,131 @@ class WorkflowManager:
         return summary
 
     def save_run_statistics(self, results, run_dir):
-        """Save essential statistics for a single run in an efficient format"""
+        """Save essential statistics for a single run"""
         run_dir = Path(run_dir)
+        
+        try:
+            # Ensure directory exists
+            run_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Save core statistics
+            stats_path = run_dir / 'core_stats.npz'
+            self.logger.info(f"Saving core statistics to {stats_path}")
+            core_stats = {
+                'max_force_uncertainty': results['max_force_uncertainty'],
+                'mean_force_uncertainty': results['mean_force_uncertainty'],
+                'energy_uncertainty': results['energy_uncertainty'],
+                'stress_uncertainty': results['stress_uncertainty'],
+                'max_forces': results['max_forces'],
+                'mean_forces': results['mean_forces']
+            }
+            np.savez_compressed(stats_path, **core_stats)
 
-        # Save core statistics in compressed numpy format
-        core_stats = {
-            'max_force_uncertainty': results['max_force_uncertainty'],
-            'mean_force_uncertainty': results['mean_force_uncertainty'],
-            'energy_uncertainty': results['energy_uncertainty'],
-            'stress_uncertainty': results['stress_uncertainty'],
-            'max_forces': results['max_forces'],
-            'mean_forces': results['mean_forces']
-        }
-        np.savez_compressed(run_dir / 'core_stats.npz', **core_stats)
-
-        # Save per-atom data in compressed format
-        atom_data = {
-            'symbols': [data[0] for data in results['force_species_data']],
-            'forces': [data[1] for data in results['force_species_data']],
-            'uncertainties': [data[2] for data in results['force_species_data']]
-        }
-        np.savez_compressed(run_dir / 'atom_data.npz', **atom_data)
+            # Save atom data
+            atom_path = run_dir / 'atom_data.npz'
+            self.logger.info(f"Saving atom data to {atom_path}")
+            atom_data = {
+                'symbols': [data[0] for data in results['force_species_data']],
+                'forces': [data[1] for data in results['force_species_data']],
+                'uncertainties': [data[2] for data in results['force_species_data']]
+            }
+            np.savez_compressed(atom_path, **atom_data)
+            self.logger.info("Successfully saved all statistics")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to save statistics: {str(e)}")
+            raise
 
 
     def plot_run_statistics(self, results, run_dir):
         """Generate and save plots for a single run"""
-
-        fig, axes = plt.subplots(3, 2, figsize=(15, 15))
-        from matplotlib import colors
-
-        # Calculate step numbers
-        steps = np.arange(len(results['max_forces'])) * NPT_SAVE_FRAME_EVERY_N
-
-
-        # 1. Force vs Uncertainty Correlation
-        all_forces = np.concatenate(results['all_forces'])
-        all_uncertainties = np.concatenate(results['force_uncertainties'])
+        run_dir = Path(run_dir)
+        plot_path = run_dir / 'run_statistics.png'
         
-        # Create heatmap  of scatter
-        heatmap, xedges, yedges = np.histogram2d(all_forces, all_uncertainties, bins=100)
-        extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]]
+        try:
+            # Create figure and axes
+            fig, axes = plt.subplots(3, 2, figsize=(15, 15))
+            from matplotlib import colors
 
-        axes[0,0].imshow(heatmap.T, extent=extent, origin='lower', 
-                        norm=colors.LogNorm(), aspect='auto', cmap='viridis')
-
-        axes[0,0].set_xlabel('Force Magnitude (eV/Å)')
-        axes[0,0].set_ylabel('Force Uncertainty (eV/Å)')
-        axes[0,0].set_title('Force vs Uncertainty Correlation')
+            # Calculate step numbers 
+            steps = np.arange(len(results['max_forces'])) * NPT_SAVE_FRAME_EVERY_N
 
 
-        # 2. Time evolution of max/mean forces
-        axes[0,1].plot(steps, results['max_forces'], label='Max Force')
-        axes[0,1].plot(steps, results['mean_forces'], label='Mean Force')
-        axes[0,1].set_xlabel('MD Step')
-        axes[0,1].set_ylabel('Force (eV/Å)')
-        axes[0,1].set_title('Force Evolution')
-        axes[0,1].legend()
+            # 1. Force vs Uncertainty Correlation
+            all_forces = np.concatenate(results['all_forces'])
+            all_uncertainties = np.concatenate(results['force_uncertainties'])
+            
+            # Create heatmap  of scatter
+            heatmap, xedges, yedges = np.histogram2d(all_forces, all_uncertainties, bins=100)
+            extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]]
 
-        # 3. Force distribution
-        axes[1,0].hist(all_forces, bins=50, alpha=0.5, label='Forces')
-        axes[1,0].set_xlabel('Force Magnitude (eV/Å)')
-        axes[1,0].set_ylabel('Count')
-        axes[1,0].set_title('Force Distribution')
+            axes[0,0].imshow(heatmap.T, extent=extent, origin='lower', 
+                            norm=colors.LogNorm(), aspect='auto', cmap='viridis')
 
-        # 4. Force uncertainty distribution
-        axes[1,1].hist(all_uncertainties, bins=50, alpha=0.5, label='Uncertainties')
-        axes[1,1].set_xlabel('Force Uncertainty (eV/Å)')
-        axes[1,1].set_ylabel('Count')
-        axes[1,1].set_title('Force Uncertainty Distribution')
+            axes[0,0].set_xlabel('Force Magnitude (eV/Å)')
+            axes[0,0].set_ylabel('Force Uncertainty (eV/Å)')
+            axes[0,0].set_title('Force vs Uncertainty Correlation')
 
-        # 5. Species-specific force analysis
-        unique_species = set()
-        for symbols, _, _ in results['force_species_data']:
-            unique_species.update(symbols)
 
-        species_forces = {s: [] for s in unique_species}
-        species_uncertainties = {s: [] for s in unique_species}
+            # 2. Time evolution of max/mean forces
+            axes[0,1].plot(steps, results['max_forces'], label='Max Force')
+            axes[0,1].plot(steps, results['mean_forces'], label='Mean Force')
+            axes[0,1].set_xlabel('MD Step')
+            axes[0,1].set_ylabel('Force (eV/Å)')
+            axes[0,1].set_title('Force Evolution')
+            axes[0,1].legend()
 
-        for symbols, forces, uncertainties in results['force_species_data']:
-            for s, f, u in zip(symbols, forces, uncertainties):
-                species_forces[s].append(f)
-                species_uncertainties[s].append(u)
+            # 3. Force distribution
+            axes[1,0].hist(all_forces, bins=50, alpha=0.5, label='Forces')
+            axes[1,0].set_xlabel('Force Magnitude (eV/Å)')
+            axes[1,0].set_ylabel('Count')
+            axes[1,0].set_title('Force Distribution')
 
-        axes[2,0].boxplot([species_forces[s] for s in unique_species], tick_labels=list(unique_species))
-        axes[2,0].set_ylabel('Force (eV/Å)')
-        axes[2,0].set_title('Forces by Species')
-        axes[2,0].tick_params(axis='x', rotation=45)
+            # 4. Force uncertainty distribution
+            axes[1,1].hist(all_uncertainties, bins=50, alpha=0.5, label='Uncertainties')
+            axes[1,1].set_xlabel('Force Uncertainty (eV/Å)')
+            axes[1,1].set_ylabel('Count')
+            axes[1,1].set_title('Force Uncertainty Distribution')
 
-        axes[2,1].boxplot([species_uncertainties[s] for s in unique_species], tick_labels=list(unique_species))
-        axes[2,1].set_ylabel('Uncertainty (eV/Å)')
-        axes[2,1].set_title('Uncertainties by Species')
-        axes[2,1].tick_params(axis='x', rotation=45)
+            # 5. Species-specific force analysis
+            unique_species = set()
+            for symbols, _, _ in results['force_species_data']:
+                unique_species.update(symbols)
 
-        plt.tight_layout()
-        plt.savefig(run_dir / 'run_statistics.png')
-        plt.close()
+            species_forces = {s: [] for s in unique_species}
+            species_uncertainties = {s: [] for s in unique_species}
+
+            for symbols, forces, uncertainties in results['force_species_data']:
+                for s, f, u in zip(symbols, forces, uncertainties):
+                    species_forces[s].append(f)
+                    species_uncertainties[s].append(u)
+
+            axes[2,0].boxplot([species_forces[s] for s in unique_species], tick_labels=list(unique_species))
+            axes[2,0].set_ylabel('Force (eV/Å)')
+            axes[2,0].set_title('Forces by Species')
+            axes[2,0].tick_params(axis='x', rotation=45)
+
+            axes[2,1].boxplot([species_uncertainties[s] for s in unique_species], tick_labels=list(unique_species))
+            axes[2,1].set_ylabel('Uncertainty (eV/Å)')
+            axes[2,1].set_title('Uncertainties by Species')
+            axes[2,1].tick_params(axis='x', rotation=45)
+
+            plt.tight_layout()
+            self.logger.info(f"Saving plot to {plot_path}")
+            plt.tight_layout()
+            
+            # Ensure directory exists
+            run_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Save with high DPI and explicit format
+            plt.savefig(plot_path, dpi=300, format='png', bbox_inches='tight')
+            self.logger.info(f"Successfully saved plot to {plot_path}")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to create/save plot: {str(e)}")
+            raise
+        finally:
+            plt.close('all')  # Ensure figures are closed
 
 def setup_logging():
     '''
@@ -664,15 +708,24 @@ def setup_logging():
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     log_file = log_dir / f'workflow_{timestamp}.log'
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler(sys.stdout)
-        ]
-    )
-    return logging.getLogger(__name__)
+    # Create formatter
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    
+    # Setup file handler
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setFormatter(formatter)
+    
+    # Setup console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    
+    # Setup logger
+    logger = logging.getLogger('workflow')
+    logger.setLevel(logging.INFO)
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    return logger
 
 
 if __name__ == "__main__":
