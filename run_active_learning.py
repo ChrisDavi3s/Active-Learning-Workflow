@@ -18,7 +18,7 @@ import logging
 from datetime import datetime
 from dataclasses import dataclass
 import json
-from typing import List, Dict, Any, Tuple, Optional, Union
+from typing import List, Dict, Any, Tuple, Optional, Union, TypeAlias
 
 
 nequip_model_files = [
@@ -28,7 +28,6 @@ nequip_model_files = [
 ]
 
 from nequip.ase import NequIPCalculator
-
 ASE_CALCULATORS = [
     NequIPCalculator.from_deployed_model(model_path=model, device="cpu")
     for model in nequip_model_files
@@ -41,7 +40,7 @@ WORKFLOW_CONFIG = {
         'LOG_DIR': None  # Will default to BASE_DIR/logs if None
     },
     'RELAXATION': {
-        'STEPS': 5,             # Number of relaxation steps. Can 
+        'STEPS': 5,             # Number of relaxation steps.
         'FORCE_CONVERGENCE': 0.01
     },
     'NPT': {
@@ -62,6 +61,18 @@ WORKFLOW_CONFIG = {
     },
     'CALCULATORS': ASE_CALCULATORS
  }
+
+# This is horrible code, but it's a quick way to get the workflow working. (TODO) - Make properties OOP classes
+# Eg
+# class PathsConfig:
+#     def __init__(self, base_dir: Path, input_xyz: Path, log_dir: Optional[Path]):
+#         self._base_dir = base_dir
+#         self._input_xyz = input_xyz
+#         self._log_dir = log_dir
+
+#     @property
+#     def base_dir(self) -> Path:
+#         return self._base_dir
 
 import warnings
 
@@ -86,13 +97,16 @@ def suppress_warnings():
 ##############################
 
 
-# Type Aliases
-PathLike = Union[str, Path]
-NDArray = np.ndarray
-AtomsList = List[Atoms]
-CalcList = List[Any]  # Type for ASE calculators
-RunStatus = Dict[str, Any]
-Config: Dict[str, Any]
+# Create a type alias for our objects - this is bad practice but it's useful for the type hints
+# (TODO) - use actual OOP to define these classes
+
+PathLike: TypeAlias = Union[str, Path]
+NDArray: TypeAlias = np.ndarray 
+AtomsList: TypeAlias = List[Atoms]
+CalcList: TypeAlias = List[Any] 
+RunStatus: TypeAlias = Dict[str, Any]
+WorkflowConfig: TypeAlias = Dict[str, Any]
+
 
 class TrajectoryAnalysis:
     def __init__(self, calculators: CalcList, logger: Optional[logging.Logger] = None) -> None:
@@ -263,7 +277,7 @@ class RunStatus:
 
 class WorkflowManager:
     def __init__(self,
-                 config: Config,
+                 config: WorkflowConfig,
                  calculators: CalcList,
                  logger: Optional[logging.Logger] = None) -> None:
         """Initialize workflow manager with configuration and calculators.
@@ -318,12 +332,12 @@ class WorkflowManager:
 
             run_dir = self.setup_run_directory(idx)
             try:
-                if self.relax_steps > 0:
+                if self.config['RELAXATION']['STEPS'] > 0:
                     relaxed = self.relax_structure(
                         atoms=structure.copy(), 
                         run_dir=run_dir, 
                         status=status, 
-                        steps=self.relax_steps
+                        steps=self.config['RELAXATION']['STEPS']
                     )
                 else:
                     # Skip relaxation but mark as successful
@@ -335,8 +349,8 @@ class WorkflowManager:
                     atoms=relaxed, 
                     run_dir=run_dir, 
                     status=status, 
-                    temperature=self.npt_temp, 
-                    steps=self.npt_steps
+                    temperature=self.config['NPT']['TEMPERATURE'], 
+                    steps=self.config['NPT']['STEPS']
                 )
 
                 # Only analyse if we haven't failed yet

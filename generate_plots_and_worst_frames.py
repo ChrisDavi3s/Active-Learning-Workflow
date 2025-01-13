@@ -1,20 +1,111 @@
+# Copyright Chris Davies 2025 
+# Usage under attached LICENSE
+
 import os
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
-from scipy.stats import sem
 import argparse
 import logging
 from datetime import datetime
 import json
-from typing import Dict, List, Any, Optional, Tuple, Set
+from typing import Dict, List, Any, Tuple, Union
 import heapq
 import sys
-from collections import defaultdict
 from tqdm import tqdm
 
-def setup_logging(output_dir: Path) -> logging.Logger:
-    """Configure logging to file and stdout"""
+# Core Configuration
+RUN_CONFIG = {
+    'PATHS': {
+        'BASE_DIR': Path('workflow_results'),
+        'OUTPUT_DIR': None                      # Will default to BASE_DIR/analysis if None
+    },
+    'ANALYSIS': {
+        'N_SKIP_FRAMES': 0,                     # Number of initial frames to skip in analysis (ie for equilibration)
+        'DPI': 300, 
+        'FIGURE_SIZES': {
+            'MAIN': (15, 25),
+            'TIME_SERIES': (15, 20),
+            'WORST_FRAMES': (10, 6)
+        }
+    },
+    'WORST_FRAMES': {                           # Criteria for identifying worst frames: set to None to skip
+        'CRITERIA': [
+            {
+                'metric': 'force',
+                'stat_type': 'max',
+                'measure': 'value',
+                'n_frames': 10,
+                'frame_range': (100, None),
+                'within_window': 50
+            },
+            {
+                'metric': 'force',
+                'stat_type': 'mean',
+                'measure': 'uncertainty',
+                'n_frames': 10,
+                'frame_range': (100, None),
+                'within_window': 50
+            },
+            {
+                'metric': 'force',
+                'stat_type': 'max',
+                'measure': 'uncertainty',
+                'species': 'Zn',
+                'n_frames': 40,
+                'frame_range': (100, None),
+                'within_window': 25
+            },
+            {
+                'metric': 'force',
+                'stat_type': 'mean',
+                'measure': 'uncertainty',
+                'species': 'Zn',
+                'n_frames': 20,
+                'frame_range': (100, None),
+                'within_window': 50
+            }
+        ],
+        'WINDOWS': {
+            'WITHIN_CRITERION': 5,
+            'GLOBAL': 2
+        }
+    }
+}
+
+# Type Aliases
+PathLike = Union[str, Path]
+NDArray = np.ndarray
+RunData = Dict[str, Any]
+AggregatedData = Dict[str, Any]
+FrameData = Dict[str, Any]
+FrameTuple = Tuple[int, int, float]  # (run_idx, frame_idx, value)
+CriteriaDict = Dict[str, Any]
+Species = str
+
+# Criterion type definition
+VALID_METRICS = {'force', 'energy', 'stress'}
+VALID_STAT_TYPES = {'max', 'mean'}
+VALID_MEASURES = {'value', 'uncertainty'}
+
+def setup_logging(output_dir: PathLike) -> logging.Logger:
+    """Configure logging with file and console output.
+    
+    Parameters
+    ----------
+    output_dir : PathLike
+        Directory where log files will be stored
+        
+    Returns
+    -------
+    logging.Logger
+        Configured logger instance
+        
+    Notes
+    -----
+    Creates timestamped log files in output_dir/logs/
+    Logs to both file and console with INFO level
+    """
     log_dir = output_dir / 'logs'
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -31,8 +122,57 @@ def setup_logging(output_dir: Path) -> logging.Logger:
     )
     return logging.getLogger(__name__)
 
-def load_run_data(run_dir: Path) -> Dict[str, Any]:
-    """Load data from a single run directory"""
+def validate_criterion(criterion: CriteriaDict) -> None:
+    """Validate a criterion against allowed values.
+    
+    Parameters
+    ----------
+    criterion : CriteriaDict
+        Dictionary containing metric, stat_type, and measure
+        
+    Raises
+    ------
+    ValueError
+        If any values invalid
+
+    """
+    if criterion['metric'] not in VALID_METRICS:
+        raise ValueError(f"Invalid metric: {criterion['metric']}. Must be one of {VALID_METRICS}")
+    
+    if criterion['stat_type'] not in VALID_STAT_TYPES:
+        raise ValueError(f"Invalid stat_type: {criterion['stat_type']}. Must be one of {VALID_STAT_TYPES}")
+        
+    if criterion.get('measure', 'value') not in VALID_MEASURES:
+        raise ValueError(f"Invalid measure: {criterion.get('measure')}. Must be one of {VALID_MEASURES}")
+
+
+def load_run_data(run_dir: PathLike) -> RunData:
+    """Load simulation data from directory.
+    
+    Parameters
+    ----------
+    run_dir : PathLike
+        Directory containing core_stats.npz and atom_data.npz
+        
+    Returns
+    -------
+    RunData
+        Dictionary with:
+        - core_stats: Dict[str, NDArray], Global statistics
+        - atom_data: Dict[str, NDArray], Per-atom data
+        
+    Raises
+    ------
+    ValueError
+        If files missing or corrupted
+        
+    Notes
+    -----
+    Expected file structure:
+    run_dir/
+        ├── core_stats.npz
+        └── atom_data.npz
+    """
     try:
         core_stats = np.load(run_dir / 'core_stats.npz')
         atom_data = np.load(run_dir / 'atom_data.npz', allow_pickle=True)
@@ -44,8 +184,36 @@ def load_run_data(run_dir: Path) -> Dict[str, Any]:
     except Exception as e:
         raise ValueError(f"Failed to load data from {run_dir}: {str(e)}")
 
-def aggregate_runs(base_dir: Path) -> Dict[str, Any]:
-    """Aggregate data from all run directories with per-frame tracking"""
+
+def aggregate_runs(base_dir: Path) -> AggregatedData:
+    """Combine data from multiple simulation runs.
+    
+    Parameters
+    ----------
+    base_dir : Path
+        Directory containing run_* subdirectories
+        
+    Returns
+    -------
+    AggregatedData
+        Dictionary with:
+        - max_force_uncertainty: List[NDArray]
+        - mean_force_uncertainty: List[NDArray]
+        - energy_uncertainty: List[NDArray]
+        - stress_uncertainty: List[NDArray]
+        - max_forces: List[NDArray]
+        - mean_forces: List[NDArray]
+        - per_species_stats: Dict[str, Dict]
+        - run_metadata: List[Dict]
+        - frame_data: List[Dict]
+        
+    Notes
+    -----
+    Processes all run_* directories in base_dir
+    Combines statistics and frame data
+    Converts lists to numpy arrays
+    """
+
     run_dirs = sorted(base_dir.glob('run_*'))
 
     aggregated = {
@@ -57,7 +225,7 @@ def aggregate_runs(base_dir: Path) -> Dict[str, Any]:
         'mean_forces': [],
         'per_species_stats': {},
         'run_metadata': [],
-        'frame_data': []  # New: track per-frame data
+        'frame_data': [] 
     }
 
     for run_idx, run_dir in enumerate(tqdm(run_dirs, desc="Processing runs")):
@@ -141,12 +309,15 @@ def aggregate_runs(base_dir: Path) -> Dict[str, Any]:
 
     return aggregated
 
-def plot_aggregated_results(data: Dict[str, Any], output_dir: Path, n_skip: int = 0) -> None:
+
+def plot_aggregated_results(data: AggregatedData,
+                            output_dir: Path,
+                            n_skip: int = 0) -> None:
     """Create comprehensive plots of aggregated simulation results.
 
     Parameters
     ----------
-    data : Dict[str, Any]
+    data : AggregatedData
         Dictionary containing aggregated simulation data with the following structure:
         - max_force_uncertainty: List[List[float]] (n_runs, n_frames) Maximum force uncertainty per frame
         - mean_force_uncertainty: List[List[float]] (n_runs, n_frames) Mean force uncertainty per frame
@@ -198,7 +369,7 @@ def plot_aggregated_results(data: Dict[str, Any], output_dir: Path, n_skip: int 
     stress_unc_array = np.array(data['stress_uncertainty'])[:, n_skip:]
 
     print("Creating main analysis plots...")
-    fig, axes = plt.subplots(4, 2, figsize=(15, 25))
+    fig, axes = plt.subplots(4, 2, figsize=RUN_CONFIG['ANALYSIS']['FIGURE_SIZES']['MAIN'])
 
     # 1. Mean Force Distribution (Histogram)
     axes[0,0].hist(mean_forces_array.flatten(), bins=100, 
@@ -315,12 +486,12 @@ def plot_aggregated_results(data: Dict[str, Any], output_dir: Path, n_skip: int 
 
     plt.tight_layout()
     print("Saving analysis plots...")
-    plt.savefig(output_dir / 'analysis.png', dpi=300, bbox_inches='tight')
+    plt.savefig(output_dir / 'analysis.png', dpi=RUN_CONFIG['ANALYSIS']['DPI'], bbox_inches='tight')
     plt.close()
 
     # Time series plots
     print("Creating time series plots...")
-    fig, axes = plt.subplots(3, 1, figsize=(15, 20))
+    fig, axes = plt.subplots(3, 1, figsize=RUN_CONFIG['ANALYSIS']['FIGURE_SIZES']['TIME_SERIES'])
 
     # Forces
     mean_force = np.mean(mean_forces_array, axis=0)
@@ -353,7 +524,7 @@ def plot_aggregated_results(data: Dict[str, Any], output_dir: Path, n_skip: int 
     axes[2].legend()
 
     plt.tight_layout()
-    plt.savefig(output_dir / 'time_series.png', dpi=300, bbox_inches='tight')
+    plt.savefig(output_dir / 'time_series.png', dpi=RUN_CONFIG['ANALYSIS']['DPI'], bbox_inches='tight')
     plt.close()
 
     print("Calculating and saving summary statistics...")
@@ -375,9 +546,12 @@ def plot_aggregated_results(data: Dict[str, Any], output_dir: Path, n_skip: int 
 
     print("Analysis complete!")
 
-def identify_worst_frames(data: Dict[str, Any], criteria: List[Dict], n_skip: int, 
-                         within_criterion_window: int = 5,
-                         global_window: int = 2) -> Dict[str, List[Tuple]]:
+def identify_worst_frames(data: AggregatedData,
+                        criteria: List[CriteriaDict],
+                        n_skip: int,
+                        within_criterion_window: int = 5,
+                        global_window: int = 2) -> Dict[str, List[FrameTuple]]:
+
     """
     Identify worst frames with two types of exclusion windows:
 
@@ -385,17 +559,30 @@ def identify_worst_frames(data: Dict[str, Any], criteria: List[Dict], n_skip: in
     2. global_window: Criterion-agnostic window - once a frame is selected, nearby frames 
        are globally excluded regardless of criteria
 
-    Example:
-    Initial selection in Criterion 1 (within=2):
-    Frame indices:    0  1  2  3  4  5  6  7  8  9
-    Selected frame:         S
-    Within excluded:     x  x  S  x  x
-    Global excluded:       x  S  x        (global_window=1)
-
-    Next selection in same criterion:
-    Available:        √              S        S
-                     (respects both windows)
+    
+    Parameters
+    ----------
+    data : AggregatedData
+        Aggregated simulation data
+    criteria : List[CriteriaDict]
+        List of criteria dictionaries
+    n_skip : int
+        Initial frames to skip
+    within_criterion_window : int, optional
+        Window for same criterion, by default 5
+    global_window : int, optional
+        Global exclusion window, by default 2
+        
+    Returns
+    -------
+    Dict[str, List[FrameTuple]]
+        Dictionary mapping criteria to worst frames
+        
     """
+
+    for criterion in criteria:
+        validate_criterion(criterion)
+
     worst_frames = {}
 
     # Track globally excluded frames (criterion-agnostic)
@@ -486,9 +673,34 @@ def identify_worst_frames(data: Dict[str, Any], criteria: List[Dict], n_skip: in
 
     return worst_frames
 
-def save_worst_frames(data: Dict[str, Any], worst_frames: Dict[str, List[Tuple]], 
+def save_worst_frames(data: AggregatedData, 
+                     worst_frames: Dict[str, List[FrameTuple]],
                      output_dir: Path) -> None:
-    """Save information about worst frames to a dedicated directory"""
+    """Save worst frame analysis results.
+
+    Parameters
+    ----------
+    data : AggregatedData
+        Original simulation data
+    worst_frames : Dict[str, List[FrameTuple]]
+        Worst frames by criterion
+    output_dir : Path
+        Output directory for results
+        Creates: output_dir/worst_runs/
+
+    Creates
+    -------
+    worst_frames.json : File
+        Frame metadata and values
+    {criterion}_worst_frames.png : Files
+        Bar plots of worst frame values
+
+    Example
+    -------
+    >>> save_worst_frames(data, worst_frames, Path("results"))
+    Saved results to results/worst_runs/
+    """
+
     worst_runs_dir = output_dir / 'worst_runs'
     worst_runs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -528,7 +740,7 @@ def save_worst_frames(data: Dict[str, Any], worst_frames: Dict[str, List[Tuple]]
         measure = parts[2]
         species = parts[3] if len(parts) > 3 else None
 
-        fig, ax = plt.subplots(figsize=(10, 6))
+        fig, ax = plt.subplots(figsize=RUN_CONFIG['ANALYSIS']['FIGURE_SIZES']['WORST_FRAMES'])
         values = [value for _, _, value in frames]
         indices = range(len(values))
 
@@ -555,83 +767,38 @@ def save_worst_frames(data: Dict[str, Any], worst_frames: Dict[str, List[Tuple]]
         ax.set_ylabel(ylabel)
 
         plt.tight_layout()
-        plt.savefig(worst_runs_dir / f'{criterion}_worst_frames.png', dpi=300)
+        plt.savefig(worst_runs_dir / f'{criterion}_worst_frames.png', dpi=RUN_CONFIG['ANALYSIS']['DPI'])
         plt.close()
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Analyze and plot workflow runs')
-    parser.add_argument('--base-dir', type=Path, default=Path('workflow_runs'),
-                       help='Base directory containing run folders')
-    parser.add_argument('--output-dir', type=Path, default=None,
-                       help='Output directory for plots (defaults to base-dir/plots)')
-    parser.add_argument('--n-skip', type=int, default=100,
-                       help='Number of initial frames to skip')
+    base_dir = RUN_CONFIG['PATHS']['BASE_DIR']
+    output_dir = RUN_CONFIG['PATHS']['OUTPUT_DIR'] or base_dir / 'analysis'
+    n_skip = RUN_CONFIG['ANALYSIS']['N_SKIP_FRAMES']
+    
+    if not base_dir.exists():
+        raise ValueError(f"Directory {base_dir} does not exist")
 
-    args = parser.parse_args()
-
-    if not args.base_dir.exists():
-        raise ValueError(f"Directory {args.base_dir} does not exist")
-
-    output_dir = args.output_dir or args.base_dir
     logger = setup_logging(output_dir)
 
     try:
-        logger.info(f"Starting analysis of workflow runs (skipping first {args.n_skip} frames)")
-        data = aggregate_runs(args.base_dir)
+        logger.info(f"Starting analysis (skipping first {n_skip} frames)")
+        data = aggregate_runs(base_dir)
         plots_dir = output_dir / 'plots'
-        plot_aggregated_results(data, plots_dir, args.n_skip)
-        logger.info(f"Analysis complete. Plots saved to {plots_dir}")
+        plot_aggregated_results(data, plots_dir, n_skip)
 
-        # Add criteria for worst frames
-        criteria = [
-        {
-            'metric': 'force',
-            'stat_type': 'max',
-            'measure': 'value',
-            'n_frames': 10,
-            'frame_range': (args.n_skip, None),
-            'within_window': 50
-        },
-        {
-            'metric': 'force',
-            'stat_type': 'mean',
-            'measure': 'uncertainty',
-            'n_frames': 10,
-            'frame_range': (args.n_skip, None),
-            'within_window': 50
-        },
-        {
-            'metric': 'force',
-            'stat_type': 'max',
-            'measure': 'uncertainty',
-            'species': 'Zn',
-            'n_frames': 40,
-            'frame_range': (args.n_skip, None),
-            'within_window': 25
-        },
-        {
-            'metric': 'force',
-            'stat_type': 'mean',
-            'measure': 'uncertainty',
-            'species': 'Zn',
-            'n_frames': 20,
-            'frame_range': (args.n_skip, None),
-            'within_window': 50
-        }
-        ]
+        if RUN_CONFIG['WORST_FRAMES'] is not None:
+            worst_frames = identify_worst_frames(
+                data, 
+                RUN_CONFIG['WORST_FRAMES']['CRITERIA'],
+                n_skip,
+                within_criterion_window=RUN_CONFIG['WORST_FRAMES']['WINDOWS']['WITHIN_CRITERION'],
+                global_window=RUN_CONFIG['WORST_FRAMES']['WINDOWS']['GLOBAL']
+            )
 
-        # Identify and save worst frames
-        worst_frames = identify_worst_frames(data, 
-                                             criteria, 
-                                             args.n_skip, 
-                                             within_criterion_window=5,
-                                             global_window=2)
+            save_worst_frames(data, worst_frames, output_dir)
 
-        save_worst_frames(data, worst_frames, output_dir)
-
-        logger.info(f"Analysis complete. Plots saved to {plots_dir}")
-        logger.info(f"Worst frames analysis saved to {output_dir/'worst_runs'}")
+        logger.info(f"Analysis complete. Results saved to {output_dir}")
 
     except Exception as e:
         logger.error(f"Analysis failed: {str(e)}")
