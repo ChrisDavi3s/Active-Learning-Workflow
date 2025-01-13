@@ -583,6 +583,10 @@ class WorkflowManager:
         fig, axes = plt.subplots(3, 2, figsize=(15, 15))
         from matplotlib import colors
 
+        # Calculate step numbers
+        steps = np.arange(len(results['max_forces'])) * NPT_SAVE_FRAME_EVERY_N
+
+
         # 1. Force vs Uncertainty Correlation
         all_forces = np.concatenate(results['all_forces'])
         all_uncertainties = np.concatenate(results['force_uncertainties'])
@@ -600,13 +604,12 @@ class WorkflowManager:
 
 
         # 2. Time evolution of max/mean forces
-        axes[0,1].plot(results['max_forces'], label='Max Force')
-        axes[0,1].plot(results['mean_forces'], label='Mean Force')
-        axes[0,1].set_xlabel('Frame')
+        axes[0,1].plot(steps, results['max_forces'], label='Max Force')
+        axes[0,1].plot(steps, results['mean_forces'], label='Mean Force')
+        axes[0,1].set_xlabel('MD Step')
         axes[0,1].set_ylabel('Force (eV/Å)')
         axes[0,1].set_title('Force Evolution')
         axes[0,1].legend()
-
 
         # 3. Force distribution
         axes[1,0].hist(all_forces, bins=50, alpha=0.5, label='Forces')
