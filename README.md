@@ -1,11 +1,18 @@
-# active_learning_workflow
+# Active Learning Workflow
 An Active Learning workflow for a committee of ASE calculators
 The general idea is:
 
 1) From an XYZ file, run a committee, generate trajectories and their associated errors
 2) Generate overall statistics and find worst frames in these generated runs.
 
-## 1) run_active_learning.py
+# 1) run_active_learning.py
+
+THIS NEEDS TO RUN WITH A GPU (well no but yes)
+
+On Young login node run this to get an interactive node:
+```bash
+qrsh -pe smp 8 -l mem=2056M,h_rt=2:00:00,gpu=1,tmpfs=50G -now no -A MCC_bulk_isl
+```
 
 This script implements a workflow for:
 1. Structure relaxation
@@ -80,7 +87,7 @@ Each run directory contains:
 - run_statistics.png : Analysis plots
 ```
 
-## Example Analysis Plots
+### Example Analysis Plots
 Below are example plots generated for each run:
 
 ![Example analysis plots](./images/run_statistics.png)
