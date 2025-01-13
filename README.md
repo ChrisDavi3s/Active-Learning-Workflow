@@ -23,7 +23,6 @@ This script implements a workflow for:
 - Python 3.8+
 - ASE
 - NequIP (or other ML potential package)
-- PyTorch (with CUDA support)
 - NumPy
 - Matplotlib
 - tqdm
