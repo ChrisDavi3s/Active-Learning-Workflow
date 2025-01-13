@@ -18,52 +18,50 @@ import logging
 from datetime import datetime
 from dataclasses import dataclass
 import json
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, Union
 
 
-##############################
-#           CONFIG           #
-#                            #
-#    Anything in bold is     #
-#    something you might     #
-#    want to change          #
-##############################
+nequip_model_files = [
+    'deployed_model_0.pth',
+    'deployed_model_1.pth',
+    'deployed_model_2.pth'
+]
 
-BASE_DIR = "workflow_results"           # Directory to run this workflow in
-INPUT_XYZ = "generated_structures.xyz"  # Path to input XYZ file with structures to run workflow on
-
-# This section needs to define a list of ase calculators
-# The first model in the list will be used for relaxation and NPT simulations
-# The rest of the models (and the first) will be used for ensemble analysis
-
-# So for you, this MODELS isnt strictly necessary
-# But you will need to define the ASE_CALCULATORS list with your models
 from nequip.ase import NequIPCalculator
 
-nequip_model_files = ['deployed_model_0.pth',
-                      'deployed_model_1.pth',
-                      'deployed_model_2.pth']
-ASE_CALCULATORS = [NequIPCalculator.from_deployed_model(model_path=model, 
-                                                        device="gpu") for model in nequip_model_files] 
+ASE_CALCULATORS = [
+    NequIPCalculator.from_deployed_model(model_path=model, device="cpu")
+    for model in nequip_model_files
+]
 
-
-# Simulation Parameters
-
-RELAXATION_STEPS = 25   # Number of relaxation steps before running NPT simulation. Can be 0
-RELAX_FORCE_CONVERGENCE = 0.01  # Convergence criterion for relaxation
-
-NPT_STEPS = 4000             # Number of NPT simulation steps
-NPT_TIME_STEP = 2 * units.fs # Time step for NPT simulation
-NPT_PRESSURE = 1.01325 * units.bar # Pressure for NPT simulation
-NPT_SAVE_FRAME_EVERY_N = 10  # Save NPT trajectory every N steps
-NPT_TEMPERATURE = 600        # Temperature for NPT simulation
-
-##############################
-#      Suppress warnings     #
-#      for Allegro but       #
-#      might be useful for   #
-#      other users           #
-##############################
+WORKFLOW_CONFIG = {
+    'PATHS': {
+        'BASE_DIR': Path('workflow_results'),
+        'INPUT_XYZ': Path('generated_structures.xyz'),
+        'LOG_DIR': None  # Will default to BASE_DIR/logs if None
+    },
+    'RELAXATION': {
+        'STEPS': 5,             # Number of relaxation steps. Can 
+        'FORCE_CONVERGENCE': 0.01
+    },
+    'NPT': {
+        'STEPS': 20,
+        'TIME_STEP': 2 * units.fs,
+        'PRESSURE': 1.01325 * units.bar,
+        'SAVE_INTERVAL': 10,
+        'TEMPERATURE': 600,
+        'THERMOSTAT_TIME': 25 * units.fs,
+        'BAROSTAT_TIME': 100 * units.fs
+    },
+    'ANALYSIS': {
+        'DPI': 300,
+        'FIGURE_SIZES': {
+            'MAIN': (15, 15),
+            'SPECIES': (10, 6)
+        }
+    },
+    'CALCULATORS': ASE_CALCULATORS
+ }
 
 import warnings
 
@@ -88,8 +86,16 @@ def suppress_warnings():
 ##############################
 
 
+# Type Aliases
+PathLike = Union[str, Path]
+NDArray = np.ndarray
+AtomsList = List[Atoms]
+CalcList = List[Any]  # Type for ASE calculators
+RunStatus = Dict[str, Any]
+Config: Dict[str, Any]
+
 class TrajectoryAnalysis:
-    def __init__(self, logger: logging.Logger = None) -> None:
+    def __init__(self, calculators: CalcList, logger: Optional[logging.Logger] = None) -> None:
         """Initialize analysis with paths to committee models and logger.
         
         Parameters:
@@ -97,7 +103,7 @@ class TrajectoryAnalysis:
         logger : logging.Logger, optional
             Logger instance for analysis
         """
-        self.calculators = ASE_CALCULATORS
+        self.calculators = calculators
         self.logger = logger or logging.getLogger(__name__)
 
 
@@ -256,50 +262,44 @@ class RunStatus:
         }
 
 class WorkflowManager:
-    def __init__(self, 
-                 base_dir: str, 
-                 input_xyz: str, 
-                 relax_steps: int, 
-                 npt_steps: int, 
-                 npt_temp: float, 
-                 logger: logging.Logger) -> None:
-        """Initialize workflow manager.
+    def __init__(self,
+                 config: Config,
+                 calculators: CalcList,
+                 logger: Optional[logging.Logger] = None) -> None:
+        """Initialize workflow manager with configuration and calculators.
 
-        Parameters:
-        -----------
-        base_dir : str
-            Base directory for workflow output
-        input_xyz : str 
-            Path to input XYZ file
-        relax_steps : int
-            Number of relaxation steps
-        npt_steps : int
-            Number of NPT simulation steps
-        npt_temp : float
-            NPT temperature in Kelvin
-        logger : logging.Logger
+        Parameters
+        ----------
+        config : Dict[str, Any]
+            Configuration dictionary
+        calculators : CalcList
+            List of initialized ASE calculators
+        logger : Optional[logging.Logger]
             Logger instance
         """
+        self.config = config
+        self.calculators = calculators
+        self.base_dir = Path(config['PATHS']['BASE_DIR'])
+        self.input_xyz = Path(config['PATHS']['INPUT_XYZ'])
 
-        self.base_dir = Path(base_dir)
-        self.input_xyz = Path(input_xyz)
-        self.relax_steps = relax_steps
-        self.npt_steps = npt_steps
-        self.npt_temp = npt_temp
+        # Setup paths
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
-        self.logger = logger.getChild('workflow_manager')  # Create child logger
-
+        # Initialize logger
+        self.logger = logger or self._setup_logging()
+        
+        # Load structures
         try:
             self.structures = read(str(self.input_xyz), index=":")
-            self.logger.info(f"Loaded {len(self.structures)} structures from {self.input_xyz}")
+            self.logger.info(f"Loaded {len(self.structures)} structures")
         except Exception as e:
             self.logger.error(f"Failed to load structures: {str(e)}")
             raise
 
+        # Initialize analysis
         analysis_logger = self.logger.getChild('analysis')
-        self.analyser = TrajectoryAnalysis(logger=analysis_logger)
-        self.run_status = []
+        self.analyser = TrajectoryAnalysis(self.config['CALCULATORS'], logger=analysis_logger)
+        self.run_status: List[RunStatus] = []
     
     def run_all(self) -> Tuple[int, int]:
         """Run complete workflow for all structures.
@@ -412,7 +412,7 @@ class WorkflowManager:
             atoms.calc=calc
 
             optimizer = BFGS(atoms, trajectory=str(run_dir / 'relaxation.traj'))
-            optimizer.run(fmax=RELAX_FORCE_CONVERGENCE, steps=steps)
+            optimizer.run(fmax=self.config['RELAXATION']['FORCE_CONVERGENCE'], steps=steps)
 
             write(str(run_dir / 'relaxed.xyz'), atoms)
             status.relaxation_success = True
@@ -457,10 +457,10 @@ class WorkflowManager:
         try:
             atoms.calc = self.analyser.calculators[0]
 
-            pressure = NPT_PRESSURE
-            ttime = 25 * units.fs
-            ptime = 100 * units.fs
-            timestep = NPT_TIME_STEP
+            pressure = self.config['NPT']['PRESSURE']
+            ttime = self.config['NPT']['THERMOSTAT_TIME']
+            ptime = self.config['NPT']['BAROSTAT_TIME']
+            timestep = self.config['NPT']['TIME_STEP']
 
             MaxwellBoltzmannDistribution(atoms, temperature_K=temperature)
 
@@ -481,7 +481,7 @@ class WorkflowManager:
             def update_progress():
                 pbar.update(10)  # Update by interval size
             
-            dyn.attach(save_frame, interval=NPT_SAVE_FRAME_EVERY_N)
+            dyn.attach(save_frame, interval=self.config['NPT']['SAVE_INTERVAL'])
             dyn.attach(update_progress, interval=10)
             
             dyn.run(steps)
@@ -611,11 +611,11 @@ class WorkflowManager:
         
         try:
             # Create figure and axes
-            fig, axes = plt.subplots(3, 2, figsize=(15, 15))
+            fig, axes = plt.subplots(3, 2, figsize=self.config['ANALYSIS']['FIGURE_SIZES']['MAIN'])
             from matplotlib import colors
 
             # Calculate step numbers 
-            steps = np.arange(len(results['max_forces'])) * NPT_SAVE_FRAME_EVERY_N
+            steps = np.arange(len(results['max_forces'])) * self.config['NPT']['SAVE_INTERVAL']
 
 
             # 1. Force vs Uncertainty Correlation
@@ -685,7 +685,7 @@ class WorkflowManager:
             run_dir.mkdir(parents=True, exist_ok=True)
             
             # Save with high DPI and explicit format
-            plt.savefig(plot_path, dpi=300, format='png', bbox_inches='tight')
+            plt.savefig(plot_path, dpi=self.config['ANALYSIS']['DPI'], format='png', bbox_inches='tight')
             self.logger.info(f"Successfully saved plot to {plot_path}")
             
         except Exception as e:
@@ -694,7 +694,7 @@ class WorkflowManager:
         finally:
             plt.close('all')  # Ensure figures are closed
 
-def setup_logging():
+def setup_logging(log_dir: PathLike = None) -> logging.Logger:
     '''
     Setup logging for the workflow
 
@@ -702,7 +702,7 @@ def setup_logging():
     --------
         logger : logging.Logger
     '''
-    log_dir = Path(BASE_DIR) / 'logs'
+    log_dir = Path(log_dir) if log_dir else WORKFLOW_CONFIG['PATHS']['BASE_DIR'] / 'logs'
     log_dir.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -710,42 +710,38 @@ def setup_logging():
 
     # Create formatter
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    
+
     # Setup file handler
     file_handler = logging.FileHandler(log_file)
     file_handler.setFormatter(formatter)
-    
+
     # Setup console handler
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(formatter)
-    
+
     # Setup logger
     logger = logging.getLogger('workflow')
     logger.setLevel(logging.INFO)
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
-    
+
     return logger
 
 
 if __name__ == "__main__":
     suppress_warnings()
-    logger = setup_logging()
 
     workflow = WorkflowManager(
-        base_dir=BASE_DIR,
-        input_xyz=INPUT_XYZ,
-        relax_steps=RELAXATION_STEPS,
-        npt_steps=NPT_STEPS,
-        npt_temp=NPT_TEMPERATURE,
-        logger=logger
+        config=WORKFLOW_CONFIG,
+        calculators=ASE_CALCULATORS,
+        logger=setup_logging(WORKFLOW_CONFIG['PATHS']['LOG_DIR'])
     )
-    
+
     successful, failed, statuses = workflow.run_all()
 
     print("\nWorkflow Summary:")
     print(f"Successful runs: {successful}")
     print(f"Failed runs: {failed}")
-    
+
     if failed > 0:
         print("\n" + workflow.format_failed_runs_report())

@@ -19,11 +19,16 @@ This script implements a workflow for:
 2. NPT molecular dynamics
 3. Uncertainty analysis using model committees
 
+The idea is, we have run a loop on a set of structures that have been generated:
+
+1) [optional] We run a relaxation on the structure
+2) We run a NPT simulation on the structure
+3) We calculate the uncertainty of the forces on the structure
+
 ### Requirements
 - Python 3.8+
 - ASE
 - NequIP (or other ML potential package)
-- PyTorch (with CUDA support)
 - NumPy
 - Matplotlib
 - tqdm
@@ -49,7 +54,9 @@ This script implements a workflow for:
 ```
 
 ### Calculator Configuration
-The workflow requires ASE-compatible calculators.
+The workflow requires ASE-compatible calculators. 
+
+Due to me being lazy, the first committee model is used to run the MD. (todo)
 
 ```python
 # Multiple NequIP models:
@@ -60,33 +67,80 @@ ASE_CALCULATORS = [NequIPCalculator.from_deployed_model(model_path=f"deployed_mo
 # Single MACE model:
 from mace.calculators import MACECalculator
 ASE_CALCULATORS = [MACECalculator(model_path="model.pt", device="cuda")]
-
 ```
 
 ### Usage
 
-$ python run_active_learning.py
+Config
+```python
+WORKFLOW_CONFIG = {
+    'PATHS': {
+        # Root directory for all output files and analysis
+        'BASE_DIR': Path('workflow_results'),
 
-```text
+        # Path to input structure file which contains initial structures
+        'INPUT_XYZ': Path('generated_structures.xyz'),
 
-Key Configuration Parameters:
---------------------------
-BASE_DIR          : Output directory (default: "workflow_results")
-INPUT_XYZ         : Input structure file (default: "generated_structures.xyz")
-RELAXATION_STEPS  : Number of relaxation steps (default: 50)
-NPT_STEPS         : Number of NPT simulation steps (default: 4000)
-NPT_TEMPERATURE   : Temperature for NPT simulation (default: 600K)
+        # Directory for log files. If None, creates 'logs' in BASE_DIR
+        'LOG_DIR': None
+    },
 
-Output:
--------
-Each run directory contains:
-- relaxation.traj  : Relaxation trajectory
-- relaxed.xyz      : Final relaxed structure
-- npt.extxyz      : NPT trajectory
-- core_stats.npz   : Compressed analysis results
-- run_statistics.png : Analysis plots
+    'RELAXATION': {
+        # Maximum number of geometry optimization steps
+        # Set to 0 to skip relaxation entirely
+        'STEPS': 5,
+
+        # Force convergence criterion in eV/Å
+        # Relaxation stops when max force is below this value (or STEPS is reached)
+        'FORCE_CONVERGENCE': 0.01
+    },
+
+    'NPT': {
+        # Total number of MD steps to run
+        # Actual simulation time = STEPS * TIME_STEP
+        'STEPS': 20,
+
+        # MD integration timestep in femtoseconds
+        'TIME_STEP': 2 * units.fs,
+
+        # Target pressure in bar (1.01325 bar = 1 atm)
+        'PRESSURE': 1.01325 * units.bar,
+
+        # Save structure to trajectory every N steps
+        'SAVE_INTERVAL': 10,
+
+        # Target temperature in Kelvin
+        'TEMPERATURE': 600,
+
+        # Thermostat coupling time - controls temperature fluctuations
+        # Larger values = slower coupling but more stable
+        'THERMOSTAT_TIME': 25 * units.fs,
+
+        # Barostat coupling time - controls pressure fluctuations
+        # Should typically be 3-4x thermostat time
+        'BAROSTAT_TIME': 100 * units.fs
+    },
+
+    'ANALYSIS': {
+        # Resolution of saved plots in dots per inch
+        # 300 is publication quality
+        'DPI': 300,
+        'FIGURE_SIZES': {
+            # Size of main analysis plots in inches (width, height)
+            'MAIN': (15, 15),
+            # Size of species-specific plots
+            'SPECIES': (10, 6)
+        }
+    },
+
+    # List of ASE calculators for committee predictions
+    'CALCULATORS': ASE_CALCULATORS
+}
 ```
 
+```bash
+$ python run_active_learning.py
+```
 ### Example Analysis Plots
 Below are example plots generated for each run:
 
