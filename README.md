@@ -223,6 +223,6 @@ This two-part pipeline allows you to:
 
 # Acknowledgements
 
-This work was mostly written by Chris Davies 2025; if you use this for a paper, please give appropriate credit.
+This code was written by Chris Davies 2025; if you use this for a paper, please give appropriate credit.
 
 Peace.
