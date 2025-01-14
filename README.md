@@ -146,13 +146,5 @@ Below are example plots generated for each run:
 
 ![Example analysis plots](./images/run_statistics.png)
 
-The plots show:
-1. Force vs Uncertainty correlation (top left)
-2. Force evolution during NPT (top right) 
-3. Force distribution (middle left)
-4. Uncertainty distribution (middle right)
-5. Species-specific forces (bottom left)
-6. Species-specific uncertainties (bottom right)
-
-
+# 2) analyze_active_learning.py
 
