@@ -744,7 +744,7 @@ def setup_logging(log_dir: PathLike = None,
     # Create logger and prevent propagation to root logger
     logger = logging.getLogger('workflow')
     logger.setLevel(logging.DEBUG)
-    logger.propagate = False  # Add this line
+    logger.propagate = False  
     
     # File handler always logs everything
     file_handler = logging.FileHandler(log_file)
