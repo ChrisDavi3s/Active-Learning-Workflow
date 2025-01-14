@@ -63,9 +63,8 @@ WORKFLOW_CONFIG = {
     'RUNTIME': {
         'ANALYZE_FAILED_RUNS': True,    # Analyze failed runs
         'VERBOSE_LOGGING': True,        # Enable verbose logging
-        'QUIET': False                  # Suppress all output to terminal
+        'QUIET': True                  # Suppress all output to terminal
     }
-
  }
 
 import warnings
@@ -171,38 +170,44 @@ class TrajectoryAnalysis:
             'force_species_data': []
         }
 
-        for frame_idx, structure in tqdm(enumerate(trajectory), total=n_frames, desc='Analysing uncertainty with committee'):
-            frame_results = {}
+        try:
+            for frame_idx, structure in tqdm(enumerate(trajectory), total=n_frames, desc='Analysing uncertainty with committee'):
+                frame_results = {}
+                for i, calc in enumerate(self.calculators):
+                    structure.calc = calc
+                    frame_results[i] = {
+                        'forces': structure.get_forces(),
+                        'stress': structure.get_stress(),
+                        'energy': structure.get_potential_energy()
+                    }
 
-            for i, calc in enumerate(self.calculators):
-                structure.calc = calc
-                frame_results[i] = {
-                    'forces': structure.get_forces(),
-                    'stress': structure.get_stress(),
-                    'energy': structure.get_potential_energy()
-                }
+                force_std = np.std([frame_results[i]['forces'] for i in range(len(self.calculators))], axis=0)
+                force_uncertainty = np.linalg.norm(force_std, axis=1)
+                energy_values = [frame_results[i]['energy'] for i in range(len(self.calculators))]
+                stress_values = [frame_results[i]['stress'] for i in range(len(self.calculators))]
+                von_mises_values = [self.calculate_von_mises_stress(stress) for stress in stress_values]
 
-            force_std = np.std([frame_results[i]['forces'] for i in range(len(self.calculators))], axis=0)
-            force_uncertainty = np.linalg.norm(force_std, axis=1)
-            energy_values = [frame_results[i]['energy'] for i in range(len(self.calculators))]
-            stress_values = [frame_results[i]['stress'] for i in range(len(self.calculators))]
-            von_mises_values = [self.calculate_von_mises_stress(stress) for stress in stress_values]
+                results['max_force_uncertainty'][frame_idx] = np.max(force_uncertainty)
+                results['mean_force_uncertainty'][frame_idx] = np.mean(force_uncertainty)
+                results['energy_uncertainty'][frame_idx] = np.std(energy_values)
+                results['stress_uncertainty'][frame_idx] = np.std(von_mises_values)
+                results['force_uncertainties'].append(force_uncertainty)
 
-            results['max_force_uncertainty'][frame_idx] = np.max(force_uncertainty)
-            results['mean_force_uncertainty'][frame_idx] = np.mean(force_uncertainty)
-            results['energy_uncertainty'][frame_idx] = np.std(energy_values)
-            results['stress_uncertainty'][frame_idx] = np.std(von_mises_values)
-            results['force_uncertainties'].append(force_uncertainty)
+                mean_forces = np.mean([frame_results[i]['forces'] for i in range(len(self.calculators))], axis=0)
+                force_magnitudes = np.linalg.norm(mean_forces, axis=1)
 
-            mean_forces = np.mean([frame_results[i]['forces'] for i in range(len(self.calculators))], axis=0)
-            force_magnitudes = np.linalg.norm(mean_forces, axis=1)
+                results['max_forces'][frame_idx] = np.max(force_magnitudes)
+                results['mean_forces'][frame_idx] = np.mean(force_magnitudes)
+                results['all_forces'].append(force_magnitudes)
+                results['force_species_data'].append((
+                    structure.get_chemical_symbols(),
+                    force_magnitudes,
+                    force_uncertainty
+                ))
 
-            results['max_forces'][frame_idx] = np.max(force_magnitudes)
-            results['mean_forces'][frame_idx] = np.mean(force_magnitudes)
-            results['all_forces'].append(force_magnitudes)
-            results['force_species_data'].append((structure.get_chemical_symbols(), 
-                                                force_magnitudes, force_uncertainty))
-
+        except Exception as e:
+            self.logger.error(f"Error in analyse_trajectory: {str(e)}")
+            # Return partial results even if some frames weren't processed
         return results
 
 @dataclass
@@ -459,39 +464,31 @@ class WorkflowManager:
         List[Atoms]
             Trajectory frames
         """
-
         self.logger.info(f"Starting NPT for structure {status.structure_index}")
-
+        trajectory_file = str(run_dir / 'npt.extxyz')
         try:
             atoms.calc = self.analyser.calculators[0]
-
             pressure = self.config['NPT']['PRESSURE']
             ttime = self.config['NPT']['THERMOSTAT_TIME']
             ptime = self.config['NPT']['BAROSTAT_TIME']
             timestep = self.config['NPT']['TIME_STEP']
-
             MaxwellBoltzmannDistribution(atoms, temperature_K=temperature)
 
-            dyn = NPT(atoms, 
-                    timestep=timestep,
+            dyn = NPT(atoms, timestep=timestep,
                     temperature_K=temperature,
                     externalstress=pressure,
                     ttime=ttime,
                     pfactor=ptime)
 
-            trajectory_file = str(run_dir / 'npt.extxyz')
-
             def save_frame():
                 write(trajectory_file, atoms, append=True)
-            
+
             pbar = tqdm(total=steps, desc='NPT Simulation')
-            
             def update_progress():
-                pbar.update(10)  # Update by interval size
-            
+                pbar.update(10)
+
             dyn.attach(save_frame, interval=self.config['NPT']['SAVE_INTERVAL'])
             dyn.attach(update_progress, interval=10)
-            
             dyn.run(steps)
             pbar.close
 
@@ -500,10 +497,20 @@ class WorkflowManager:
             return read(trajectory_file, index=":")
 
         except Exception as e:
-            error_msg = f"NPT failed for structure {status.structure_index}: {str(e)}"
-            self.logger.error(error_msg)
-            status.error_message = error_msg
+            err = f"NPT failed for structure {status.structure_index}: {str(e)}"
+            self.logger.error(err)
+            status.error_message = err
+            if self.config['RUNTIME'].get('ANALYZE_FAILED_RUNS', False):
+                self.logger.info("Attempting partial analysis for failed run.")
+                if os.path.exists(trajectory_file):
+                    try:
+                        partial_frames = read(trajectory_file, index=":")
+                        if partial_frames:
+                            self.analyse_run(run_dir, partial_frames, status)
+                    except Exception as e2:
+                        self.logger.error(f"Partial analysis failed: {str(e2)}")
             raise
+
 
     def format_failed_runs_report(self) -> str:
         """Generate detailed report of failed runs."""
@@ -546,12 +553,16 @@ class WorkflowManager:
             status.analysis_success = True
             self.logger.info(f"Successfully analysed structure {status.structure_index}")
             return results
-            
+
         except Exception as e:
-            error_msg = f"Analysis failed for structure {status.structure_index}: {str(e)}"
-            self.logger.error(error_msg)
-            status.error_message = error_msg
-            raise
+            err = f"Analysis failed for structure {status.structure_index}: {str(e)}"
+            self.logger.error(err)
+            status.analysis_success = False
+            status.error_message = err
+            # Attempt partial saving if results exist
+            partial_results = self.analyser.analyse_trajectory(trajectory)  # runs but only partial if it fails again
+            self.save_run_statistics(partial_results, run_dir)
+            return partial_results
             
     def summarise_workflow(self):
         """Print workflow summary"""
