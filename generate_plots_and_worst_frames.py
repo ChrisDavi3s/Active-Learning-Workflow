@@ -13,23 +13,26 @@ from typing import Dict, List, Any, Tuple, Union
 import heapq
 import sys
 from tqdm import tqdm
+from ase.io import read, write
 
-# Core Configuration
 RUN_CONFIG = {
     'PATHS': {
         'BASE_DIR': Path('workflow_results'),
-        'OUTPUT_DIR': None                      # Will default to BASE_DIR/analysis if None
+        'OUTPUT_DIR': None  # Will default to BASE_DIR/analysis if None
     },
     'ANALYSIS': {
-        'N_SKIP_FRAMES': 0,                     # Number of initial frames to skip in analysis (ie for equilibration)
-        'DPI': 300, 
+        'N_SKIP_FRAMES': 0,     # Number of initial frames to skip in analysis/plots (e.g. for equilibration)
+        'DPI': 300,
         'FIGURE_SIZES': {
             'MAIN': (15, 25),
             'TIME_SERIES': (15, 20),
             'WORST_FRAMES': (10, 6)
         }
     },
-    'WORST_FRAMES': {                           # Criteria for identifying worst frames: set to None to skip
+    'WORST_FRAMES': {
+        'ENABLED': True,  # Toggle to False to skip picking worst frames entirely
+        'JSON_FILE': 'worst_frames.json',  
+        'XYZ_FILE': 'worst_frames.xyz',             #None to skip saving XYZ file 
         'CRITERIA': [
             {
                 'metric': 'force',
@@ -121,6 +124,65 @@ def setup_logging(output_dir: PathLike) -> logging.Logger:
         ]
     )
     return logging.getLogger(__name__)
+
+def collect_frames_from_json(json_file: str, base_path: str = None) -> List[Dict]:
+    """
+    Read the JSON file and collect all frames into a list of ASE atoms objects.
+
+    Parameters
+    ----------
+    json_file : str
+        Path to the JSON file containing frame information
+    base_path : str, optional
+        Base path to prepend to run directories if they're relative paths
+
+    Returns
+    -------
+    List[ase.Atoms]
+        List of ASE Atoms objects for all frames
+    """
+    with open(json_file, 'r') as f:
+        data = json.load(f)
+
+    collected_frames = []
+
+    # Process each criterion in the JSON
+    for criterion_name, frames in data.items():
+        print(f"\nProcessing criterion: {criterion_name}")
+
+        for frame_info in frames:
+            run_dir = frame_info['run_dir']
+            if base_path:
+                run_dir = os.path.join(base_path, run_dir)
+
+            # Construct path to trajectory file
+            traj_path = os.path.join(run_dir, 'npt.extxyz')
+
+            if not os.path.exists(traj_path):
+                print(f"Warning: Trajectory file not found at {traj_path}")
+                continue
+
+            try:
+                # Read the specific frame from trajectory
+                atoms = read(traj_path, index=frame_info['frame_idx'])
+
+                # Add extra info to atoms object for reference
+                atoms.info['original_run'] = frame_info['run_idx']
+                atoms.info['original_frame'] = frame_info['frame_idx']
+                atoms.info['criterion'] = criterion_name
+                atoms.info['value'] = frame_info['value']
+                atoms.info['stat_type'] = frame_info['stat_type']
+                atoms.info['metric'] = frame_info['metric']
+                atoms.info['measure'] = frame_info['measure']
+                if frame_info.get('species'):
+                    atoms.info['species'] = frame_info['species']
+
+                collected_frames.append(atoms)
+                print(f"Added frame {frame_info['frame_idx']} from run {frame_info['run_idx']}")
+            except Exception as e:
+                print(f"Error reading frame {frame_info['frame_idx']} from {traj_path}: {e}")
+
+    return collected_frames
 
 def validate_criterion(criterion: CriteriaDict) -> None:
     """Validate a criterion against allowed values.
@@ -673,9 +735,10 @@ def identify_worst_frames(data: AggregatedData,
 
     return worst_frames
 
-def save_worst_frames(data: AggregatedData, 
+def save_worst_frames(data: AggregatedData,
                      worst_frames: Dict[str, List[FrameTuple]],
-                     output_dir: Path) -> None:
+                     output_dir: Path,
+                     save_xyz: bool = True) -> None:
     """Save worst frame analysis results.
 
     Parameters
@@ -686,28 +749,15 @@ def save_worst_frames(data: AggregatedData,
         Worst frames by criterion
     output_dir : Path
         Output directory for results
-        Creates: output_dir/worst_runs/
-
-    Creates
-    -------
-    worst_frames.json : File
-        Frame metadata and values
-    {criterion}_worst_frames.png : Files
-        Bar plots of worst frame values
-
-    Example
-    -------
-    >>> save_worst_frames(data, worst_frames, Path("results"))
-    Saved results to results/worst_runs/
+    save_xyz : bool, optional
+        Whether to save frames to XYZ file (default: True)
     """
-
     worst_runs_dir = output_dir / 'worst_runs'
     worst_runs_dir.mkdir(parents=True, exist_ok=True)
 
     # Save summary to JSON
     summary = {}
     for criterion, frames in worst_frames.items():
-        # Parse criterion string to get components
         parts = criterion.split('_')
         stat_type = parts[0]
         metric = parts[1]
@@ -728,8 +778,20 @@ def save_worst_frames(data: AggregatedData,
             for run_idx, frame_idx, value in frames
         ]
 
-    with open(worst_runs_dir / 'worst_frames.json', 'w') as f:
+    json_path = worst_runs_dir / RUN_CONFIG['WORST_FRAMES']['JSON_FILE']
+    with open(json_path, 'w') as f:
         json.dump(summary, f, indent=4)
+
+    # Save XYZ file if enabled
+    if save_xyz and RUN_CONFIG['WORST_FRAMES']['XYZ_FILE']:
+        try:
+            frames = collect_frames_from_json(json_path)
+            if frames:
+                xyz_path = worst_runs_dir / RUN_CONFIG['WORST_FRAMES']['XYZ_FILE']
+                write(xyz_path, frames)
+                logging.info(f"Saved worst frames to XYZ file: {xyz_path}")
+        except Exception as e:
+            logging.error(f"Failed to save XYZ file: {str(e)}")
 
     # Create plots for each criterion
     for criterion, frames in worst_frames.items():
@@ -775,7 +837,7 @@ def main():
     base_dir = RUN_CONFIG['PATHS']['BASE_DIR']
     output_dir = RUN_CONFIG['PATHS']['OUTPUT_DIR'] or base_dir / 'analysis'
     n_skip = RUN_CONFIG['ANALYSIS']['N_SKIP_FRAMES']
-    
+
     if not base_dir.exists():
         raise ValueError(f"Directory {base_dir} does not exist")
 
@@ -787,16 +849,26 @@ def main():
         plots_dir = output_dir / 'plots'
         plot_aggregated_results(data, plots_dir, n_skip)
 
-        if RUN_CONFIG['WORST_FRAMES'] is not None:
+        # Check if worst frames analysis is enabled
+        if RUN_CONFIG['WORST_FRAMES']['ENABLED']:
+            logger.info("Starting worst frames analysis...")
             worst_frames = identify_worst_frames(
-                data, 
+                data,
                 RUN_CONFIG['WORST_FRAMES']['CRITERIA'],
                 n_skip,
                 within_criterion_window=RUN_CONFIG['WORST_FRAMES']['WINDOWS']['WITHIN_CRITERION'],
                 global_window=RUN_CONFIG['WORST_FRAMES']['WINDOWS']['GLOBAL']
             )
 
-            save_worst_frames(data, worst_frames, output_dir)
+            save_worst_frames(
+                data,
+                worst_frames,
+                output_dir,
+                save_xyz=bool(RUN_CONFIG['WORST_FRAMES']['XYZ_FILE'])
+            )
+            logger.info("Worst frames analysis complete")
+        else:
+            logger.info("Worst frames analysis disabled")
 
         logger.info(f"Analysis complete. Results saved to {output_dir}")
 
