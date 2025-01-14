@@ -13,6 +13,7 @@ from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 import matplotlib.pyplot as plt
 from ase.stress import voigt_6_to_full_3x3_stress
 from tqdm import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
 import sys
 import logging
 from datetime import datetime
@@ -479,18 +480,18 @@ class WorkflowManager:
                     externalstress=pressure,
                     ttime=ttime,
                     pfactor=ptime)
-
+            
             def save_frame():
                 write(trajectory_file, atoms, append=True)
-
-            pbar = tqdm(total=steps, desc='NPT Simulation')
             def update_progress():
-                pbar.update(10)
+                    pbar.update(10)
 
-            dyn.attach(save_frame, interval=self.config['NPT']['SAVE_INTERVAL'])
-            dyn.attach(update_progress, interval=10)
-            dyn.run(steps)
-            pbar.close
+            with logging_redirect_tqdm():
+                pbar = tqdm(total=steps, desc='NPT Simulation')
+                dyn.attach(save_frame, interval=self.config['NPT']['SAVE_INTERVAL'])
+                dyn.attach(update_progress, interval=10)
+                dyn.run(steps)
+                pbar.close()
 
             status.npt_success = True
             self.logger.info(f"Successfully completed NPT for structure {status.structure_index}")
@@ -740,9 +741,10 @@ def setup_logging(log_dir: PathLike = None,
 
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     
-    # Create logger
+    # Create logger and prevent propagation to root logger
     logger = logging.getLogger('workflow')
-    logger.setLevel(logging.DEBUG)  # Capture all levels
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False  # Add this line
     
     # File handler always logs everything
     file_handler = logging.FileHandler(log_file)
