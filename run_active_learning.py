@@ -59,20 +59,14 @@ WORKFLOW_CONFIG = {
             'SPECIES': (10, 6)
         }
     },
-    'CALCULATORS': ASE_CALCULATORS
+    'CALCULATORS': ASE_CALCULATORS,
+    'RUNTIME': {
+        'ANALYZE_FAILED_RUNS': True,    # Analyze failed runs
+        'VERBOSE_LOGGING': True,        # Enable verbose logging
+        'QUIET': False                  # Suppress all output to terminal
+    }
+
  }
-
-# This is horrible code, but it's a quick way to get the workflow working. (TODO) - Make properties OOP classes
-# Eg
-# class PathsConfig:
-#     def __init__(self, base_dir: Path, input_xyz: Path, log_dir: Optional[Path]):
-#         self._base_dir = base_dir
-#         self._input_xyz = input_xyz
-#         self._log_dir = log_dir
-
-#     @property
-#     def base_dir(self) -> Path:
-#         return self._base_dir
 
 import warnings
 
@@ -708,13 +702,24 @@ class WorkflowManager:
         finally:
             plt.close('all')  # Ensure figures are closed
 
-def setup_logging(log_dir: PathLike = None) -> logging.Logger:
+def setup_logging(log_dir: PathLike = None, 
+                 verbose: bool = True,
+                 quiet: bool = False) -> logging.Logger:
     '''
-    Setup logging for the workflow
-
+    Setup logging for the workflow with configurable output levels
+    
+    Parameters:
+    -----------
+    log_dir : PathLike
+        Directory for log files
+    verbose : bool
+        Enable verbose console output
+    quiet : bool
+        Suppress console output entirely
+        
     Returns:
     --------
-        logger : logging.Logger
+    logger : logging.Logger
     '''
     log_dir = Path(log_dir) if log_dir else WORKFLOW_CONFIG['PATHS']['BASE_DIR'] / 'logs'
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -722,22 +727,24 @@ def setup_logging(log_dir: PathLike = None) -> logging.Logger:
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     log_file = log_dir / f'workflow_{timestamp}.log'
 
-    # Create formatter
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
-    # Setup file handler
+    
+    # Create logger
+    logger = logging.getLogger('workflow')
+    logger.setLevel(logging.DEBUG)  # Capture all levels
+    
+    # File handler always logs everything
     file_handler = logging.FileHandler(log_file)
     file_handler.setFormatter(formatter)
-
-    # Setup console handler
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(formatter)
-
-    # Setup logger
-    logger = logging.getLogger('workflow')
-    logger.setLevel(logging.INFO)
+    file_handler.setLevel(logging.DEBUG)
     logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
+
+    # Console handler depends on settings
+    if not quiet:
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(formatter)
+        console_handler.setLevel(logging.INFO if verbose else logging.WARNING)
+        logger.addHandler(console_handler)
 
     return logger
 
@@ -748,7 +755,11 @@ if __name__ == "__main__":
     workflow = WorkflowManager(
         config=WORKFLOW_CONFIG,
         calculators=ASE_CALCULATORS,
-        logger=setup_logging(WORKFLOW_CONFIG['PATHS']['LOG_DIR'])
+        logger=setup_logging(
+            WORKFLOW_CONFIG['PATHS']['LOG_DIR'],
+            verbose=WORKFLOW_CONFIG['RUNTIME']['VERBOSE_LOGGING'],
+            quiet=WORKFLOW_CONFIG['RUNTIME']['QUIET']
+        )
     )
 
     successful, failed, statuses = workflow.run_all()
