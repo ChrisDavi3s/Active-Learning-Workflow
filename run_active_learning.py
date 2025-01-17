@@ -19,7 +19,7 @@ import logging
 from datetime import datetime
 from dataclasses import dataclass
 import json
-from typing import List, Dict, Any, Tuple, Optional, Union, TypeAlias
+from typing import List, Dict, Any, Tuple, Optional, Union
 
 
 nequip_model_files = [
@@ -94,12 +94,12 @@ def suppress_warnings():
 # Create a type alias for our objects - this is bad practice but it's useful for the type hints
 # (TODO) - use actual OOP to define these classes
 
-PathLike: TypeAlias = Union[str, Path]
-NDArray: TypeAlias = np.ndarray 
-AtomsList: TypeAlias = List[Atoms]
-CalcList: TypeAlias = List[Any] 
-RunStatus: TypeAlias = Dict[str, Any]
-WorkflowConfig: TypeAlias = Dict[str, Any]
+PathLike = Union[str, Path]
+NDArray = np.ndarray 
+AtomsList = List[Atoms]
+CalcList = List[Any] 
+RunStatus = Dict[str, Any]
+WorkflowConfig = Dict[str, Any]
 
 
 class TrajectoryAnalysis:
