@@ -6,9 +6,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 import argparse
-import seaborn as sns
 import logging
 from datetime import datetime
+import seaborn as sns
 import json
 from typing import Dict, List, Any, Tuple, Union
 import heapq
@@ -22,7 +22,7 @@ RUN_CONFIG = {
         'OUTPUT_DIR': None  # Will default to BASE_DIR/analysis if None
     },
     'ANALYSIS': {
-        'N_SKIP_FRAMES': 100,     # Number of initial frames to skip in analysis/plots (e.g. for equilibration)
+        'N_SKIP_FRAMES': 0,     # Number of initial frames to skip in analysis/plots (e.g. for equilibration)
         'DPI': 300,
         'FIGURE_SIZES': {
             'MAIN': (15, 25),
@@ -30,8 +30,12 @@ RUN_CONFIG = {
             'WORST_FRAMES': (10, 6)
         }
     },
+    'FAILURE_HANDLING': {                              # Options for handling failed runs  
+        'ANALYZE_FAILED_RUNS': False,                  # Analyse failed runs in the same way as successful runs
+        'EXCLUDE_FAILED_RUNS_FROM_WORST_FRAMES': False # Exclude failed runs from worst frames analysis
+    },
     'WORST_FRAMES': {
-        'ENABLED': False,  # Toggle to False to skip picking worst frames entirely
+        'ENABLED': True,  # Toggle to False to skip picking worst frames entirely
         'JSON_FILE': 'worst_frames.json',  
         'XYZ_FILE': 'worst_frames.xyz',             #None to skip saving XYZ file 
         'CRITERIA': [
@@ -47,7 +51,7 @@ RUN_CONFIG = {
                 'metric': 'force',
                 'stat_type': 'mean',
                 'measure': 'uncertainty',
-                'n_frames': 25,
+                'n_frames': 10,
                 'frame_range': (100, None),
                 'within_window': 50
             },
@@ -62,14 +66,6 @@ RUN_CONFIG = {
             },
             {
                 'metric': 'force',
-                'stat_type': 'max',
-                'measure': 'uncertainty',
-                'n_frames': 25,
-                'frame_range': (100, None),
-                'within_window': 25
-            },
-            {
-                'metric': 'force',
                 'stat_type': 'mean',
                 'measure': 'uncertainty',
                 'species': 'Zn',
@@ -79,8 +75,8 @@ RUN_CONFIG = {
             }
         ],
         'WINDOWS': {
-            'WITHIN_CRITERION': 25,
-            'GLOBAL': 25
+            'WITHIN_CRITERION': 5,
+            'GLOBAL': 2
         }
     }
 }
@@ -299,57 +295,84 @@ def aggregate_runs(base_dir: Path) -> AggregatedData:
         'frame_data': [] 
     }
 
+    run_dirs = sorted(base_dir.glob('run_*'))
+
+    # Attempt to load run status
+    run_status_json = base_dir / 'workflow_status.json'
+    failed_indices = set()
+    if run_status_json.exists():
+        try:
+            with open(run_status_json, 'r') as f:
+                status_data = json.load(f)
+            for s in status_data.get('run_status', []):
+                # Mark as failed if not all true
+                if not (s.get('relaxation_success') and s.get('npt_success') and s.get('analysis_success')):
+                    failed_indices.add(s['structure_index'])
+        except Exception as e:
+            logging.warning(f"Could not parse workflow_status.json: {e}")
+
+    # Prepare aggregator
+    aggregated = {
+        'max_force_uncertainty': [],
+        'mean_force_uncertainty': [],
+        'energy_uncertainty': [],
+        'stress_uncertainty': [],
+        'max_forces': [],
+        'mean_forces': [],
+        'per_species_stats': {},
+        'run_metadata': [],
+        'frame_data': []
+    }
+
+    # Global flags
+    analyze_failed_runs = RUN_CONFIG['FAILURE_HANDLING']['ANALYZE_FAILED_RUNS']
+
     for run_idx, run_dir in enumerate(tqdm(run_dirs, desc="Processing runs")):
+        # Check if run is failed
+        is_failed = (run_idx in failed_indices)
+        if is_failed and not analyze_failed_runs:
+            logging.info(f"Skipping failed run {run_dir}")
+            continue
+
         try:
             data = load_run_data(run_dir)
 
-            # Aggregate core statistics
             for key in data['core_stats']:
                 if key in aggregated:
                     aggregated[key].append(data['core_stats'][key])
 
-            # Process per-frame and per-species data
             n_frames = len(data['atom_data']['symbols'])
             for frame_idx in range(n_frames):
                 frame_info = {
                     'run_idx': run_idx,
                     'frame_idx': frame_idx,
                     'species_data': {},
-                    'global_stats': {}
+                    'global_stats': {},
+                    'failed_run': is_failed
                 }
 
-                # Add global statistics for this frame
-                for key in ['max_forces', 'mean_forces', 'max_force_uncertainty', 
-                          'mean_force_uncertainty', 'energy_uncertainty', 'stress_uncertainty']:
+                for key in ['max_forces','mean_forces','max_force_uncertainty',
+                            'mean_force_uncertainty','energy_uncertainty','stress_uncertainty']:
                     if key in data['core_stats']:
                         frame_info['global_stats'][key] = data['core_stats'][key][frame_idx]
 
-                # Process atomic data for this frame
                 sym_list = data['atom_data']['symbols'][frame_idx]
                 force_list = data['atom_data']['forces'][frame_idx]
                 unc_list = data['atom_data']['uncertainties'][frame_idx]
-
                 for sym, force, unc in zip(sym_list, force_list, unc_list):
                     if sym not in aggregated['per_species_stats']:
                         aggregated['per_species_stats'][sym] = {
-                            'forces': [],
-                            'uncertainties': [],
-                            'frame_indices': [],
-                            'run_indices': []
+                            'forces': [], 'uncertainties': [],
+                            'frame_indices': [], 'run_indices': []
                         }
                     if sym not in frame_info['species_data']:
-                        frame_info['species_data'][sym] = {
-                            'forces': [],
-                            'uncertainties': []
-                        }
+                        frame_info['species_data'][sym] = {'forces': [], 'uncertainties': [] }
 
-                    # Add to per-species aggregated data
                     aggregated['per_species_stats'][sym]['forces'].append(force)
                     aggregated['per_species_stats'][sym]['uncertainties'].append(unc)
                     aggregated['per_species_stats'][sym]['frame_indices'].append(frame_idx)
                     aggregated['per_species_stats'][sym]['run_indices'].append(run_idx)
 
-                    # Add to frame-specific data
                     frame_info['species_data'][sym]['forces'].append(force)
                     frame_info['species_data'][sym]['uncertainties'].append(unc)
 
@@ -357,29 +380,24 @@ def aggregate_runs(base_dir: Path) -> AggregatedData:
 
             aggregated['run_metadata'].append({
                 'run_dir': str(run_dir),
-                'n_frames': n_frames
+                'n_frames': n_frames,
+                'failed_run': is_failed
             })
 
         except Exception as e:
             logging.warning(f"Skipping {run_dir}: {e}")
             continue
 
-    # Convert lists to numpy arrays
-    for key in ['max_force_uncertainty', 'mean_force_uncertainty', 
-                'energy_uncertainty', 'stress_uncertainty', 
-                'max_forces', 'mean_forces']:
+    for key in ['max_force_uncertainty','mean_force_uncertainty','energy_uncertainty',
+                'stress_uncertainty','max_forces','mean_forces']:
         if aggregated[key]:
             aggregated[key] = np.array(aggregated[key])
 
-    # Convert per-species data to numpy arrays
     for sym in aggregated['per_species_stats']:
-        for key in ['forces', 'uncertainties', 'frame_indices', 'run_indices']:
-            aggregated['per_species_stats'][sym][key] = np.array(
-                aggregated['per_species_stats'][sym][key]
-            )
+        for arrkey in ['forces','uncertainties','frame_indices','run_indices']:
+            aggregated['per_species_stats'][sym][arrkey] = np.array(aggregated['per_species_stats'][sym][arrkey])
 
     return aggregated
-
 
 def plot_aggregated_results(data: AggregatedData,
                             output_dir: Path,
@@ -637,28 +655,30 @@ def identify_worst_frames(data: AggregatedData,
         
     """
 
-    for criterion in criteria:
-        validate_criterion(criterion)
+    from collections import defaultdict
 
     worst_frames = {}
-
-    # Track globally excluded frames (criterion-agnostic)
     globally_excluded = set()
+    global_frame_pool = set()
 
-    # Initialize global frame pool
-    global_frame_pool = set((f['run_idx'], f['frame_idx']) 
-                           for f in data['frame_data'] 
-                           if f['frame_idx'] >= n_skip)
+    exclude_failed = RUN_CONFIG['FAILURE_HANDLING']['EXCLUDE_FAILED_RUNS_FROM_WORST_FRAMES']
+
+    # Build global pool
+    for f in data['frame_data']:
+        if f['frame_idx'] < n_skip:
+            continue
+        if exclude_failed and f['failed_run']:
+            continue
+        global_frame_pool.add((f['run_idx'], f['frame_idx']))
 
     def exclude_global_window(run_idx: int, frame_idx: int):
-        """Helper to exclude frames within global window."""
         for offset in range(-global_window, global_window + 1):
-            nearby_frame = (run_idx, frame_idx + offset)
-            globally_excluded.add(nearby_frame)
-            if nearby_frame in global_frame_pool:
-                global_frame_pool.remove(nearby_frame)
+            globally_excluded.add((run_idx, frame_idx + offset))
+            if (run_idx, frame_idx + offset) in global_frame_pool:
+                global_frame_pool.remove((run_idx, frame_idx + offset))
 
     for criterion in criteria:
+        validate_criterion(criterion)
         metric = criterion['metric']
         stat_type = criterion['stat_type']
         measure = criterion.get('measure', 'value')
@@ -671,59 +691,44 @@ def identify_worst_frames(data: AggregatedData,
         if species:
             desc += f"_{species}"
 
-        # Create criterion-specific frame pool from available global frames
-        criterion_frame_pool = global_frame_pool.copy()
-
+        # Local pool
+        criterion_pool = set(global_frame_pool)
         heap = []
-        # Collect initial candidates into heap
-        for frame_info in data['frame_data']:
-            run_idx = frame_info['run_idx']
-            frame_idx = frame_info['frame_idx']
 
-            # Skip if frame is globally excluded or out of range
-            if ((run_idx, frame_idx) not in criterion_frame_pool or
-                (run_idx, frame_idx) in globally_excluded or
-                frame_idx < frame_range[0] or 
-                (frame_range[1] and frame_idx >= frame_range[1])):
+        for f in data['frame_data']:
+            run_idx = f['run_idx']
+            frame_idx = f['frame_idx']
+            if (run_idx, frame_idx) not in criterion_pool: 
+                continue
+            if (run_idx, frame_idx) in globally_excluded:
+                continue
+            if frame_idx < frame_range[0] or (frame_range[1] and frame_idx >= frame_range[1]):
                 continue
 
             if species:
-                if species not in frame_info['species_data']:
+                if species not in f['species_data']:
                     continue
-                if measure == 'value':
-                    values = frame_info['species_data'][species]['forces']
-                else:  # uncertainty
-                    values = frame_info['species_data'][species]['uncertainties']
-                value = max(values) if stat_type == 'max' else np.mean(values)
+                values = (f['species_data'][species]['forces'] if measure=='value'
+                          else f['species_data'][species]['uncertainties'])
+                val = np.max(values) if stat_type=='max' else np.mean(values)
             else:
-                if measure == 'value':
-                    value = frame_info['global_stats'][f'{stat_type}_forces']
-                else:  # uncertainty
-                    value = frame_info['global_stats'][f'{stat_type}_force_uncertainty']
+                valname = f'{stat_type}_forces' if measure=='value' else f'{stat_type}_force_uncertainty'
+                val = f['global_stats'].get(valname, 0.0)
 
-            heapq.heappush(heap, (-value, run_idx, frame_idx))
+            heapq.heappush(heap, (-val, run_idx, frame_idx))
 
         selected = []
-
         while heap and len(selected) < n_frames:
-            neg_value, run_idx, frame_idx = heapq.heappop(heap)
-            value = -neg_value
-
-            # Skip if frame was excluded
-            if ((run_idx, frame_idx) not in criterion_frame_pool or
-                (run_idx, frame_idx) in globally_excluded):
+            neg_val, run_idx, frame_idx = heapq.heappop(heap)
+            val = -neg_val
+            if ((run_idx, frame_idx) not in criterion_pool 
+                or (run_idx, frame_idx) in globally_excluded):
                 continue
 
-            # Add to selected frames
-            selected.append((run_idx, frame_idx, value))
-
-            # Apply within-criterion window
+            selected.append((run_idx, frame_idx, val))
             for offset in range(-local_window, local_window + 1):
-                nearby_frame = (run_idx, frame_idx + offset)
-                if nearby_frame in criterion_frame_pool:
-                    criterion_frame_pool.remove(nearby_frame)
-
-            # Apply global window
+                if (run_idx, frame_idx + offset) in criterion_pool:
+                    criterion_pool.remove((run_idx, frame_idx + offset))
             exclude_global_window(run_idx, frame_idx)
 
         worst_frames[desc] = selected
@@ -803,6 +808,7 @@ def save_worst_frames(data: AggregatedData,
 
         ax.bar(indices, values)
 
+        # Create more informative title and labels
         title_parts = [
             f"{stat_type.capitalize()} {metric}",
             f"({measure})" if measure == "uncertainty" else "",
@@ -813,6 +819,7 @@ def save_worst_frames(data: AggregatedData,
         ax.set_title(f'Worst Frames - {title}')
         ax.set_xlabel('Frame Index (in selection)')
 
+        # More informative y-label based on metric and measure
         ylabel_parts = [
             f"{stat_type.capitalize()} {metric}",
             f"{measure}" if measure == "uncertainty" else "",
@@ -871,3 +878,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
