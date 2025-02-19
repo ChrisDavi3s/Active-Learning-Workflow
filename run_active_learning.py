@@ -45,6 +45,7 @@ WORKFLOW_CONFIG = {
         'FORCE_CONVERGENCE': 0.01
     },
     'NPT': {
+        'CONVERT_UPPER_DIAGONAL_CELL': True,
         'STEPS': 20,
         'TIME_STEP': 2 * units.fs,
         'PRESSURE': 1.01325 * units.bar,
@@ -344,7 +345,18 @@ class WorkflowManager:
                     self.logger.info(f"Skipping relaxation for structure {idx} (relax_steps=0)")
                     relaxed = structure.copy()
                     status.relaxation_success = True
-                    
+
+                if self.config['NPT']['CONVERT_UPPER_DIAGONAL_CELL']:
+                    from ase.cell import Cell
+                    self.logger.info(f"Converting cell matrix to upper triangular ")
+                    # Thanks @chiang-yuan on Github <3
+                    q,r  = np.linalg.qr(relaxed.cell, mode='complete')
+                    matrix = np.array(relaxed.cell)
+                    upper_triangular_matrix = matrix @ q
+                    cell = Cell(upper_triangular_matrix)
+                    relaxed.set_cell(cell, scale_atoms = True)
+                    self.logger.info(f"Successfully converted cell matrix to upper triangular ")
+
                 npt_trajectory = self.run_npt(
                     atoms=relaxed, 
                     run_dir=run_dir, 
