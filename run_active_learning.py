@@ -7,6 +7,7 @@ from pathlib import Path
 from ase.io import read, write
 from ase.atoms import Atoms
 from ase.optimize import BFGS
+from ase.cell import Cell
 from ase import units
 from ase.md.npt import NPT
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
@@ -384,19 +385,19 @@ class WorkflowManager:
         return successful, len(failed_runs), self.run_status
 
     def make_cell_upper_triangular(cell):
-    """
-    Convert a cell matrix to an upper triangular cell using QR decomposition.
+        """
+        Convert a cell matrix to an upper triangular cell using QR decomposition.
 
-    Parameters:
-        cell: ASE Cell or array-like cell matrix
+        Parameters:
+            cell: ASE Cell or array-like cell matrix
 
-    Returns:
-        New ASE Cell with an upper triangular cell matrix.
-    """
-    matrix = np.array(cell)
-    # Using QR decomposition; R is upper triangular.
-    Q, R = np.linalg.qr(matrix)
-    return Cell(R)
+        Returns:
+            New ASE Cell with an upper triangular cell matrix.
+        """
+        matrix = np.array(cell)
+        # Using QR decomposition; R is upper triangular.
+        Q, R = np.linalg.qr(matrix)
+        return Cell(R)
 
     def setup_run_directory(self, idx: int) -> Path:
         """Create run directory for given structure index.
