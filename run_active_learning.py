@@ -347,15 +347,10 @@ class WorkflowManager:
                     status.relaxation_success = True
 
                 if self.config['NPT']['CONVERT_UPPER_DIAGONAL_CELL']:
-                    from ase.cell import Cell
-                    self.logger.info(f"Converting cell matrix to upper triangular ")
-                    # Thanks @chiang-yuan on Github <3
-                    q,r  = np.linalg.qr(relaxed.cell, mode='complete')
-                    matrix = np.array(relaxed.cell)
-                    upper_triangular_matrix = matrix @ q
-                    cell = Cell(upper_triangular_matrix)
-                    relaxed.set_cell(cell, scale_atoms = True)
-                    self.logger.info(f"Successfully converted cell matrix to upper triangular ")
+                    self.logger.info("Converting cell matrix to upper triangular")
+                    cell = self.make_cell_upper_triangular(relaxed.cell)
+                    relaxed.set_cell(cell, scale_atoms=True)
+                    self.logger.info("Successfully converted cell matrix to upper triangular")
 
                 npt_trajectory = self.run_npt(
                     atoms=relaxed, 
@@ -387,6 +382,21 @@ class WorkflowManager:
 
         successful = len(self.structures) - len(failed_runs)
         return successful, len(failed_runs), self.run_status
+
+    def make_cell_upper_triangular(cell):
+    """
+    Convert a cell matrix to an upper triangular cell using QR decomposition.
+
+    Parameters:
+        cell: ASE Cell or array-like cell matrix
+
+    Returns:
+        New ASE Cell with an upper triangular cell matrix.
+    """
+    matrix = np.array(cell)
+    # Using QR decomposition; R is upper triangular.
+    Q, R = np.linalg.qr(matrix)
+    return Cell(R)
 
     def setup_run_directory(self, idx: int) -> Path:
         """Create run directory for given structure index.
