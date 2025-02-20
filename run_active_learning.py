@@ -10,6 +10,8 @@ from ase.optimize import BFGS
 from ase.cell import Cell
 from ase import units
 from ase.md.npt import NPT
+from ase.md.langevin import Langevin
+
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 import matplotlib.pyplot as plt
 from ase.stress import voigt_6_to_full_3x3_stress
@@ -45,15 +47,17 @@ WORKFLOW_CONFIG = {
         'STEPS': 5,             # Number of relaxation steps.
         'FORCE_CONVERGENCE': 0.01
     },
-    'NPT': {
+    'MD': { 
+        'ENSEMBLE': 'NVT',  # Can be 'NPT' or 'NVT'
         'CONVERT_UPPER_DIAGONAL_CELL': True,
         'STEPS': 20,
         'TIME_STEP': 2 * units.fs,
-        'PRESSURE': 1.01325 * units.bar,
+        'PRESSURE': 1.01325 * units.bar,  # For NPT
         'SAVE_INTERVAL': 10,
         'TEMPERATURE': 600,
-        'THERMOSTAT_TIME': 25 * units.fs,
-        'BAROSTAT_TIME': 100 * units.fs
+        'THERMOSTAT_TIME': 25 * units.fs,  # For NPT
+        'BAROSTAT_TIME': 100 * units.fs,   # For NPT
+        'FRICTION': 0.002,                 # For NVT
     },
     'ANALYSIS': {
         'DPI': 300,
@@ -226,7 +230,7 @@ class RunStatus:
         Index of the structure being processed
     relaxation_success : bool
         Whether relaxation was successful
-    npt_success : bool
+    md_success : bool
         Whether NPT simulation was successful
     analysis_success : bool
         Whether analysis was successful
@@ -235,7 +239,7 @@ class RunStatus:
     '''
     structure_index: int
     relaxation_success: Optional[bool] = None
-    npt_success: Optional[bool] = None
+    md_success: Optional[bool] = None
     analysis_success: Optional[bool] = None
     error_message: str = ""
 
@@ -243,24 +247,24 @@ class RunStatus:
         """Mark the run as failed and record the error message."""
         self.error_message = msg
         self.relaxation_success = self.relaxation_success or False
-        self.npt_success = self.npt_success or False
+        self.md_success = self.md_success or False
         self.analysis_success = self.analysis_success or False
 
     def is_failed(self) -> bool:
         """Check whether any step has failed."""
-        return bool(self.error_message) or not (self.relaxation_success and self.npt_success and self.analysis_success)
+        return bool(self.error_message) or not (self.relaxation_success and self.md_success and self.analysis_success)
 
     def is_failed_before_analysis(self) -> bool:
-        """Check whether relaxation or NPT failed."""
-        return bool(self.error_message) or not (self.relaxation_success and self.npt_success)
+        """Check whether relaxation or MD failed."""
+        return bool(self.error_message) or not (self.relaxation_success and self.md_success)
 
     def __str__(self) -> str:
         """Format status as human-readable string."""
         status = []
         if not self.relaxation_success:
             status.append("relaxation failed")
-        if not self.npt_success:
-            status.append("NPT failed")
+        if not self.md_success:
+            status.append("MD failed")
         if not self.analysis_success:
             status.append("analysis failed")
             
@@ -272,7 +276,7 @@ class RunStatus:
         return {
             "structure_index": self.structure_index,
             "relaxation_success": self.relaxation_success,
-            "npt_success": self.npt_success,
+            "md_success": self.md_success,
             "analysis_success": self.analysis_success,
             "error_message": self.error_message
         }
@@ -347,23 +351,23 @@ class WorkflowManager:
                     relaxed = structure.copy()
                     status.relaxation_success = True
 
-                if self.config['NPT']['CONVERT_UPPER_DIAGONAL_CELL']:
+                if self.config['MD']['CONVERT_UPPER_DIAGONAL_CELL']:
                     self.logger.info("Converting cell matrix to upper triangular")
                     cell = self.make_cell_upper_triangular(relaxed.cell)
                     relaxed.set_cell(cell, scale_atoms=True)
                     self.logger.info("Successfully converted cell matrix to upper triangular")
 
-                npt_trajectory = self.run_npt(
-                    atoms=relaxed, 
-                    run_dir=run_dir, 
-                    status=status, 
-                    temperature=self.config['NPT']['TEMPERATURE'], 
-                    steps=self.config['NPT']['STEPS']
+                md_trajectory = self.run_md(
+                    atoms=relaxed,
+                    run_dir=run_dir,
+                    status=status,
+                    temperature=self.config['MD']['TEMPERATURE'],
+                    steps=self.config['MD']['STEPS']
                 )
 
                 # Only analyse if we haven't failed yet
                 if not status.is_failed_before_analysis():
-                    self.analyse_run(run_dir, npt_trajectory, status)
+                    self.analyse_run(run_dir, md_trajectory, status)
 
             except Exception as e:
                 self.logger.error(f"Failure for structure {idx}: {str(e)}")
@@ -384,7 +388,7 @@ class WorkflowManager:
         successful = len(self.structures) - len(failed_runs)
         return successful, len(failed_runs), self.run_status
 
-    def make_cell_upper_triangular(cell):
+    def make_cell_upper_triangular(self, cell):
         """
         Convert a cell matrix to an upper triangular cell using QR decomposition.
 
@@ -462,66 +466,78 @@ class WorkflowManager:
             status.error_message = error_msg
             raise
 
-    def run_npt(self, 
-                atoms: Atoms, 
-                run_dir: Path, 
-                status: RunStatus,
-                temperature: float = 500,
-                steps: int = 1000) -> List[Atoms]:
-        """Run NPT molecular dynamics simulation.
+    def run_md(self, 
+           atoms: Atoms, 
+           run_dir: Path, 
+           status: RunStatus, 
+           temperature: float, 
+           steps: int) -> List[Atoms]:
+        """Run MD simulation (either NPT or NVT ensemble).
 
         Parameters:
         -----------
         atoms : Atoms
-            Initial structure
+            Initial structure.
         run_dir : Path
-            Output directory
+            Output directory.
         status : RunStatus
-            Status tracking object
+            Status tracking object.
         temperature : float
-            Simulation temperature in Kelvin
+            Simulation temperature in Kelvin.
         steps : int
-            Number of MD steps
+            Number of MD steps.
 
         Returns:
         --------
         List[Atoms]
-            Trajectory frames
+            Trajectory frames.
         """
-        self.logger.info(f"Starting NPT for structure {status.structure_index}")
-        trajectory_file = str(run_dir / 'npt.extxyz')
+        self.logger.info(f"Starting MD simulation for structure {status.structure_index}")
+        trajectory_file = str(run_dir / 'md_trajectory.extxyz')
         try:
             atoms.calc = self.analyser.calculators[0]
-            pressure = self.config['NPT']['PRESSURE']
-            ttime = self.config['NPT']['THERMOSTAT_TIME']
-            ptime = self.config['NPT']['BAROSTAT_TIME']
-            timestep = self.config['NPT']['TIME_STEP']
+            md_config = self.config['MD']
+            ensemble = md_config['ENSEMBLE']
+            timestep = md_config['TIME_STEP']
+            save_interval = md_config['SAVE_INTERVAL']
+
             MaxwellBoltzmannDistribution(atoms, temperature_K=temperature)
 
-            dyn = NPT(atoms, timestep=timestep,
-                    temperature_K=temperature,
-                    externalstress=pressure,
-                    ttime=ttime,
-                    pfactor=ptime)
-            
+            if ensemble == 'NPT':
+                pressure = md_config['PRESSURE']
+                ttime = md_config['THERMOSTAT_TIME']
+                ptime = md_config['BAROSTAT_TIME']
+                dyn = NPT(atoms, timestep=timestep,
+                        temperature_K=temperature,
+                        externalstress=pressure,
+                        ttime=ttime,
+                        pfactor=ptime)
+            elif ensemble == 'NVT':
+                friction = md_config.get('FRICTION', 0.002)
+                dyn = Langevin(atoms, timestep=timestep,
+                            temperature_K=temperature,
+                            friction=friction)
+            else:
+                raise ValueError(f"Unsupported ensemble type: {ensemble}")
+
             def save_frame():
                 write(trajectory_file, atoms, append=True)
             def update_progress():
-                    pbar.update(10)
+                pbar.update(10)
 
             with logging_redirect_tqdm():
-                pbar = tqdm(total=steps, desc='NPT Simulation')
-                dyn.attach(save_frame, interval=self.config['NPT']['SAVE_INTERVAL'])
+                pbar = tqdm(total=steps, desc=f'{ensemble} Simulation')
+                dyn.attach(save_frame, interval=save_interval)
                 dyn.attach(update_progress, interval=10)
                 dyn.run(steps)
                 pbar.close()
 
-            status.npt_success = True
-            self.logger.info(f"Successfully completed NPT for structure {status.structure_index}")
+            status.md_success = True
+            self.logger.info(f"MD ({ensemble}) successful for structure {status.structure_index}")
             return read(trajectory_file, index=":")
 
         except Exception as e:
-            err = f"NPT failed for structure {status.structure_index}: {str(e)}"
+            err = f"MD ({ensemble}) failed for structure {status.structure_index}: {str(e)}"
             self.logger.error(err)
             status.error_message = err
             if self.config['RUNTIME'].get('ANALYZE_FAILED_RUNS', False):
@@ -534,7 +550,6 @@ class WorkflowManager:
                     except Exception as e2:
                         self.logger.error(f"Partial analysis failed: {str(e2)}")
             raise
-
 
     def format_failed_runs_report(self) -> str:
         """Generate detailed report of failed runs."""
@@ -591,7 +606,7 @@ class WorkflowManager:
     def summarise_workflow(self):
         """Print workflow summary"""
         successful = sum(1 for status in self.run_status 
-                        if status.relaxation_success and status.npt_success and status.analysis_success)
+                        if status.relaxation_success and status.md_success and status.analysis_success)
         failed = len(self.run_status) - successful
 
         summary = f"""
@@ -603,8 +618,8 @@ class WorkflowManager:
 
         Failure breakdown:
         - Relaxation failures: {sum(1 for s in self.run_status if not s.relaxation_success)}
-        - NPT failures: {sum(1 for s in self.run_status if s.relaxation_success and not s.npt_success)}
-        - Analysis failures: {sum(1 for s in self.run_status if s.npt_success and not s.analysis_success)}
+        - MD failures: {sum(1 for s in self.run_status if s.relaxation_success and not s.md_success)}
+        - Analysis failures: {sum(1 for s in self.run_status if s.md_success and not s.analysis_success)}
         """
 
         self.logger.info(summary)
@@ -658,7 +673,7 @@ class WorkflowManager:
             from matplotlib import colors
 
             # Calculate step numbers 
-            steps = np.arange(len(results['max_forces'])) * self.config['NPT']['SAVE_INTERVAL']
+            steps = np.arange(len(results['max_forces'])) * self.config['MD']['SAVE_INTERVAL']
 
 
             # 1. Force vs Uncertainty Correlation
