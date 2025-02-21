@@ -35,7 +35,7 @@ RUN_CONFIG = {
         'EXCLUDE_FAILED_RUNS_FROM_WORST_FRAMES': False # Exclude failed runs from worst frames analysis
     },
     'WORST_FRAMES': {
-        'ENABLED': True,  # Toggle to False to skip picking worst frames entirely
+        'ENABLED': False,  # Toggle to False to skip picking worst frames entirely
         'JSON_FILE': 'worst_frames.json',  
         'XYZ_FILE': 'worst_frames.xyz',             #None to skip saving XYZ file 
         'CRITERIA': [
@@ -161,7 +161,7 @@ def collect_frames_from_json(json_file: str, base_path: str = None) -> List[Dict
                 run_dir = os.path.join(base_path, run_dir)
 
             # Construct path to trajectory file
-            traj_path = os.path.join(run_dir, 'npt.extxyz')
+            traj_path = os.path.join(run_dir, 'md_trajectory.extxyz')
 
             if not os.path.exists(traj_path):
                 print(f"Warning: Trajectory file not found at {traj_path}")
@@ -306,7 +306,7 @@ def aggregate_runs(base_dir: Path) -> AggregatedData:
                 status_data = json.load(f)
             for s in status_data.get('run_status', []):
                 # Mark as failed if not all true
-                if not (s.get('relaxation_success') and s.get('npt_success') and s.get('analysis_success')):
+                if not (s.get('relaxation_success') and s.get('md_success') and s.get('analysis_success')):
                     failed_indices.add(s['structure_index'])
         except Exception as e:
             logging.warning(f"Could not parse workflow_status.json: {e}")

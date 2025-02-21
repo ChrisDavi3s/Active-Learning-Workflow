@@ -335,7 +335,6 @@ class WorkflowManager:
         for idx, structure in enumerate(self.structures):
             status = RunStatus(structure_index=idx)
             self.run_status.append(status)
-
             run_dir = self.setup_run_directory(idx)
             try:
                 if self.config['RELAXATION']['STEPS'] > 0:
@@ -344,9 +343,9 @@ class WorkflowManager:
                         run_dir=run_dir, 
                         status=status, 
                         steps=self.config['RELAXATION']['STEPS']
-                    )
+                    )                
+                    
                 else:
-                    # Skip relaxation but mark as successful
                     self.logger.info(f"Skipping relaxation for structure {idx} (relax_steps=0)")
                     relaxed = structure.copy()
                     status.relaxation_success = True
@@ -377,7 +376,7 @@ class WorkflowManager:
             "failed_runs": failed_runs,
             "run_status": [s.to_dict() for s in self.run_status],
             "timestamp": datetime.now().isoformat(),
-            "relaxation_performed": self.relax_steps > 0
+            "relaxation_performed": self.config['RELAXATION']['STEPS'] is not None and self.config['RELAXATION']['STEPS'] > 0
         }
         with open(self.base_dir / 'workflow_status.json', 'w') as f:
             json.dump(status_data, f, indent=2)
@@ -390,6 +389,7 @@ class WorkflowManager:
         Convert a cell matrix to an upper triangular cell using QR decomposition.
 
         Parameters:
+
             atoms (Atoms): ASE Atoms object with cell matrix to convert.
 
         Returns:
