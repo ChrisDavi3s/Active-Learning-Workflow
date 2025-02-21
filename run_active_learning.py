@@ -48,7 +48,7 @@ WORKFLOW_CONFIG = {
         'FORCE_CONVERGENCE': 0.01
     },
     'MD': { 
-        'ENSEMBLE': 'NVT',  # Can be 'NPT' or 'NVT'
+        'ENSEMBLE': 'NPT',  # Can be 'NPT' or 'NVT'
         'CONVERT_UPPER_DIAGONAL_CELL': True,
         'STEPS': 20,
         'TIME_STEP': 2 * units.fs,
@@ -352,10 +352,7 @@ class WorkflowManager:
                     status.relaxation_success = True
 
                 if self.config['MD']['CONVERT_UPPER_DIAGONAL_CELL']:
-                    self.logger.info("Converting cell matrix to upper triangular")
-                    cell = self.make_cell_upper_triangular(relaxed.cell)
-                    relaxed.set_cell(cell, scale_atoms=True)
-                    self.logger.info("Successfully converted cell matrix to upper triangular")
+                    relaxed = self.make_cell_upper_triangular(relaxed)
 
                 md_trajectory = self.run_md(
                     atoms=relaxed,
@@ -388,20 +385,21 @@ class WorkflowManager:
         successful = len(self.structures) - len(failed_runs)
         return successful, len(failed_runs), self.run_status
 
-    def make_cell_upper_triangular(self, cell):
+    def make_cell_upper_triangular(self, atoms) -> Atoms:
         """
         Convert a cell matrix to an upper triangular cell using QR decomposition.
 
         Parameters:
-            cell: ASE Cell or array-like cell matrix
+            atoms (Atoms): ASE Atoms object with cell matrix to convert.
 
         Returns:
-            New ASE Cell with an upper triangular cell matrix.
+            atoms (Atoms): ASE Atoms object with upper triangular cell matrix.
         """
-        matrix = np.array(cell)
-        # Using QR decomposition; R is upper triangular.
-        Q, R = np.linalg.qr(matrix)
-        return Cell(R)
+        self.logger.info("Converting cell matrix to upper triangular")
+        cellpar = atoms.cell.cellpar()
+        atoms.set_cell(cellpar, scale_atoms=True)
+        self.logger.info("Successfully converted cell matrix to upper triangular")
+        return atoms
 
     def setup_run_directory(self, idx: int) -> Path:
         """Create run directory for given structure index.
