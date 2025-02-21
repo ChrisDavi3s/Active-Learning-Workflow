@@ -49,7 +49,6 @@ WORKFLOW_CONFIG = {
     },
     'MD': { 
         'ENSEMBLE': 'NPT',  # Can be 'NPT' or 'NVT'
-        'CONVERT_UPPER_DIAGONAL_CELL': True,
         'STEPS': 20,
         'TIME_STEP': 2 * units.fs,
         'PRESSURE': 1.01325 * units.bar,  # For NPT
@@ -66,6 +65,7 @@ WORKFLOW_CONFIG = {
             'SPECIES': (10, 6)
         }
     },
+    'CONVERT_UPPER_DIAGONAL_CELL': True,
     'CALCULATORS': ASE_CALCULATORS,
     'RUNTIME': {
         'ANALYZE_FAILED_RUNS': True,    # Analyze failed runs
@@ -337,9 +337,12 @@ class WorkflowManager:
             self.run_status.append(status)
             run_dir = self.setup_run_directory(idx)
             try:
+                if self.config['CONVERT_UPPER_DIAGONAL_CELL']:
+                    structure = self.make_cell_upper_triangular(structure.copy())
+
                 if self.config['RELAXATION']['STEPS'] > 0:
                     relaxed = self.relax_structure(
-                        atoms=structure.copy(), 
+                        atoms=structure, 
                         run_dir=run_dir, 
                         status=status, 
                         steps=self.config['RELAXATION']['STEPS']
@@ -347,11 +350,8 @@ class WorkflowManager:
                     
                 else:
                     self.logger.info(f"Skipping relaxation for structure {idx} (relax_steps=0)")
-                    relaxed = structure.copy()
+                    relaxed = structure
                     status.relaxation_success = True
-
-                if self.config['MD']['CONVERT_UPPER_DIAGONAL_CELL']:
-                    relaxed = self.make_cell_upper_triangular(relaxed)
 
                 md_trajectory = self.run_md(
                     atoms=relaxed,
